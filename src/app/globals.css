@@ -1,0 +1,49 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 98%;
+    --foreground: 220 15% 12%;
+    --card: 0 0% 100%;
+    --card-foreground: 220 15% 12%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 220 15% 12%;
+    --primary: 220 85% 40%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 220 15% 94%;
+    --secondary-foreground: 220 15% 25%;
+    --muted: 220 10% 94%;
+    --muted-foreground: 220 10% 48%;
+    --accent: 220 15% 92%;
+    --accent-foreground: 220 15% 12%;
+    --destructive: 0 84% 56%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 220 13% 88%;
+    --input: 220 13% 88%;
+    --ring: 220 85% 40%;
+    --radius: 0.5rem;
+
+    /* Custom semantic colors */
+    --status-empty: 142 70% 45%;
+    --status-occupied: 220 80% 52%;
+    --status-reserved: 38 95% 50%;
+    --status-cleaning: 0 65% 54%;
+    --status-waiting: 270 65% 55%;
+    --sla-warning: 38 95% 50%;
+    --sla-danger: 0 84% 56%;
+  }
+
+  * { @apply border-border; }
+  body { @apply bg-background text-foreground font-sans antialiased; }
+}
+
+@layer utilities {
+  .blink-red { animation: blink-red 0.8s ease-in-out infinite; }
+}
+
+@keyframes blink-red {
+  0%, 100% { background-color: hsl(0 84% 56% / 0.15); }
+  50%       { background-color: hsl(0 84% 56% / 0.40); }
+}
