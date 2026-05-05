@@ -14,12 +14,23 @@ import type { Station, OrderItem, Order } from "@/types"
 // ─── Constants ──────────────────────────────────────────────────────────────
 const STATIONS: Station[] = ["Nướng", "Chiên", "Tráng miệng", "Bar", "Lạnh"]
 
-const STATION_CFG: Record<Station, { color: string; borderColor: string; textColor: string; icon: React.ElementType; bg: string }> = {
-  "Nướng":       { color: "border-l-orange-500",  borderColor: "border-orange-500",  textColor: "text-orange-400",  icon: Flame,     bg: "bg-orange-500/10" },
-  "Chiên":       { color: "border-l-yellow-500",  borderColor: "border-yellow-500",  textColor: "text-yellow-400",  icon: Zap,       bg: "bg-yellow-500/10" },
-  "Tráng miệng": { color: "border-l-pink-400",    borderColor: "border-pink-400",    textColor: "text-pink-400",    icon: Coffee,    bg: "bg-pink-500/10"   },
-  "Bar":         { color: "border-l-violet-500",  borderColor: "border-violet-500",  textColor: "text-violet-400",  icon: Coffee,    bg: "bg-violet-500/10" },
-  "Lạnh":        { color: "border-l-blue-400",    borderColor: "border-blue-400",    textColor: "text-blue-400",    icon: Timer,     bg: "bg-blue-500/10"   },
+const STATION_CFG: Record<Station, {
+  color: string;
+  borderColor: string;
+  textColor: string;
+  icon: React.ElementType;
+  bg: string;
+  cardBg: string;
+  cardBorder: string;
+  btnBg: string;
+  badgeBg: string;
+  barColor: string;
+}> = {
+  "Nướng":       { color: "border-l-orange-500", borderColor: "border-orange-500", textColor: "text-orange-400", icon: Flame,  bg: "bg-orange-500/10", cardBg: "bg-orange-950/30", cardBorder: "border-orange-900/40", btnBg: "bg-orange-500 hover:bg-orange-400", badgeBg: "bg-orange-500/20 border-orange-500/30", barColor: "bg-orange-400" },
+  "Chiên":       { color: "border-l-yellow-500", borderColor: "border-yellow-500", textColor: "text-yellow-400", icon: Zap,    bg: "bg-yellow-500/10", cardBg: "bg-yellow-950/30", cardBorder: "border-yellow-900/40", btnBg: "bg-yellow-500 hover:bg-yellow-400", badgeBg: "bg-yellow-500/20 border-yellow-500/30", barColor: "bg-yellow-400" },
+  "Tráng miệng": { color: "border-l-pink-400",   borderColor: "border-pink-400",   textColor: "text-pink-400",   icon: Coffee, bg: "bg-pink-500/10",   cardBg: "bg-pink-950/30",   cardBorder: "border-pink-900/40",   btnBg: "bg-pink-500 hover:bg-pink-400",     badgeBg: "bg-pink-500/20 border-pink-500/30",     barColor: "bg-pink-400"   },
+  "Bar":         { color: "border-l-violet-500", borderColor: "border-violet-500", textColor: "text-violet-400", icon: Coffee, bg: "bg-violet-500/10", cardBg: "bg-violet-950/30", cardBorder: "border-violet-900/40", btnBg: "bg-violet-500 hover:bg-violet-400", badgeBg: "bg-violet-500/20 border-violet-500/30", barColor: "bg-violet-400" },
+  "Lạnh":        { color: "border-l-blue-400",   borderColor: "border-blue-400",   textColor: "text-blue-400",   icon: Timer,  bg: "bg-blue-500/10",   cardBg: "bg-blue-950/30",   cardBorder: "border-blue-900/40",   btnBg: "bg-blue-500 hover:bg-blue-400",     badgeBg: "bg-blue-500/20 border-blue-500/30",     barColor: "bg-blue-400"   },
 }
 
 // ─── Ticket interface ────────────────────────────────────────────────────────
@@ -385,18 +396,18 @@ function TicketCard({ ticket: t, second: _second, isRecalled, onStart, onReady, 
 
   const stationCfg = STATION_CFG[t.station]
 
-  // Bar color
-  const barColor = isDone ? "bg-emerald-500" : isOverdue ? "bg-red-500" : isWarn ? "bg-amber-400" : "bg-emerald-400"
+  // Bar color — keep state colors (done/overdue/warn) but use station tone for normal
+  const barColor = isDone ? "bg-emerald-500" : isOverdue ? "bg-red-500" : isWarn ? "bg-amber-400" : stationCfg.barColor
   const barWidth = isDone ? "100%" : `${Math.min(slaPct * 100, 100)}%`
 
-  // Card background
+  // Card background — done/overdue/warn keep their semantic colors, otherwise tint with station color
   const cardBg = isDone
     ? "bg-[#0d1f14] border-emerald-800/50"
     : isOverdue
     ? "bg-[#1f0d0d] border-red-800/40"
     : isWarn
     ? "bg-[#1a180a] border-amber-800/40"
-    : "bg-[#141720] border-white/8"
+    : cn(stationCfg.cardBg, stationCfg.cardBorder)
 
   return (
     <div className={cn(
@@ -421,10 +432,10 @@ function TicketCard({ ticket: t, second: _second, isRecalled, onStart, onReady, 
               </span>
             )}
           </div>
-          {/* Timer */}
+          {/* Timer — uses station color when cooking, keeps semantic colors for special states */}
           <div className={cn(
             "font-mono text-sm font-black tabular-nums",
-            isDone ? "text-emerald-400" : isOverdue ? "text-red-400" : isWarn ? "text-amber-400" : "text-gray-400"
+            isDone ? "text-emerald-400" : isOverdue ? "text-red-400" : isWarn ? "text-amber-400" : isCooking ? stationCfg.textColor : "text-gray-400"
           )}>
             {formatElapsed(elapsed)}
           </div>
@@ -464,12 +475,12 @@ function TicketCard({ ticket: t, second: _second, isRecalled, onStart, onReady, 
         )}
       </p>
 
-      {/* Status badge */}
+      {/* Status badge — cooking uses station color, done stays emerald (universal "complete" signal) */}
       <div className="px-3 pb-2">
         <span className={cn(
           "text-[10px] px-2 py-0.5 rounded-md font-bold",
           isPending  && "bg-gray-700/60 text-gray-400",
-          isCooking  && "bg-amber-500/20 text-amber-400 border border-amber-500/30",
+          isCooking  && cn("border", stationCfg.badgeBg, stationCfg.textColor),
           isDone     && "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30",
         )}>
           {isPending ? "● Chờ" : isCooking ? "🔥 Đang nấu" : "✓ Sẵn sàng"}
@@ -482,7 +493,10 @@ function TicketCard({ ticket: t, second: _second, isRecalled, onStart, onReady, 
           <div className="flex gap-1.5">
             <button
               onClick={onStart}
-              className="flex-1 py-2 bg-amber-500 hover:bg-amber-400 text-white rounded-xl text-xs font-black transition-colors active:scale-95"
+              className={cn(
+                "flex-1 py-2 text-white rounded-xl text-xs font-black transition-colors active:scale-95",
+                stationCfg.btnBg
+              )}
             >
               🔥 Bắt đầu
             </button>

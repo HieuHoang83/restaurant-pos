@@ -3,7 +3,7 @@
 import { useState, useMemo, useCallback, useEffect } from "react"
 import Link from "next/link"
 import {
-  UtensilsCrossed, ChevronLeft, Plus, Minus, Trash2,
+  UtensilsCrossed, ChevronLeft, ChevronDown, ChevronRight, Plus, Minus, Trash2,
   CreditCard, SplitSquareHorizontal, Tag, Star, AlertCircle,
   CheckCircle2, Clock, X, Printer, Receipt, ChefHat,
   Bell, Flame,
@@ -51,6 +51,7 @@ export default function POSPage() {
   const [tables, setTables]       = useState(TABLES)
   const [orders, setOrders]       = useState<Order[]>(ORDERS)
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set())
   const [draftItems, setDraftItems] = useState<OrderItem[]>([])
   const [menuCat, setMenuCat]     = useState("Tất cả")
   const [menuSearch, setMenuSearch] = useState("")
@@ -62,6 +63,9 @@ export default function POSPage() {
   const [splitBy, setSplitBy]     = useState(0)
   const [tip, setTip]             = useState(0)
   const [payMethod, setPayMethod] = useState<"cash"|"card"|"e-wallet">("cash")
+  const [rating, setRating]       = useState(0)
+  const [hoverRating, setHoverRating] = useState(0)
+  const [feedback, setFeedback]   = useState("")
 
   // Note modal
   const [noteTarget, setNoteTarget] = useState<OrderItem | null>(null)
@@ -122,6 +126,9 @@ export default function POSPage() {
     setTip(0)
     setSplitBy(0)
     setShowPay(false)
+    setRating(0)
+    setHoverRating(0)
+    setFeedback("")
   }, [])
 
   // ── Menu → Draft ──
@@ -159,6 +166,16 @@ export default function POSPage() {
         : o
     ))
     showToast("Đã đánh dấu phục vụ ✓")
+  }, [showToast])
+
+  const cancelSentItem = useCallback((orderId: string, itemId: string) => {
+    if (!confirm("Hủy món này? Bếp sẽ không nấu nữa.")) return
+    setOrders(prev => prev.map(o =>
+      o.id === orderId
+        ? { ...o, items: o.items.map(i => i.id === itemId ? { ...i, status: "cancelled" as const } : i) }
+        : o
+    ))
+    showToast("Đã hủy món ✕", "info")
   }, [showToast])
 
   // ── Send to kitchen ──
@@ -210,9 +227,10 @@ export default function POSPage() {
       t.id === selectedId ? { ...t, status: "needs-cleaning" as const, currentOrderId: undefined, occupiedSince: undefined } : t
     ))
     setShowPay(false)
-    showToast(`Thanh toán thành công ${formatCurrency(bill.total + tip)} 🎉`)
-    setTimeout(() => { setSelectedId(null); setDraftItems([]) }, 1500)
-  }, [selectedId, discountAmt, tip, payMethod, bill.total, showToast])
+    const ratingMsg = rating > 0 ? ` · ${rating}★` : ""
+    showToast(`Thanh toán thành công ${formatCurrency(bill.total + tip)}${ratingMsg} 🎉`)
+    setTimeout(() => { setSelectedId(null); setDraftItems([]); setRating(0); setHoverRating(0); setFeedback("") }, 1500)
+  }, [selectedId, discountAmt, tip, payMethod, bill.total, rating, showToast])
 
   // Stats for header
   const occupiedCount  = tables.filter(t => t.status === "occupied").length
@@ -258,61 +276,91 @@ export default function POSPage() {
 
       <div className="flex flex-1 min-h-0">
         {/* ═══ LEFT: Table map ═══ */}
-        <aside className="w-64 bg-white border-r border-slate-100 flex flex-col shrink-0">
-          <div className="px-4 py-2.5 border-b border-slate-100 flex items-center justify-between">
-            <span className="text-xs font-bold text-slate-400 uppercase tracking-widest">Sơ đồ bàn</span>
-            <div className="flex gap-2 text-[10px]">
+        <aside className="w-[336px] bg-white border-r border-slate-100 flex flex-col shrink-0">
+          <div className="px-5 py-3 border-b border-slate-100 flex items-center justify-between">
+            <span className="text-sm font-bold text-slate-400 uppercase tracking-widest">Sơ đồ bàn</span>
+            <div className="flex gap-2 text-xs">
               <span className="text-emerald-600 font-semibold">{emptyCount} trống</span>
               <span className="text-slate-300">·</span>
               <span className="text-sky-600 font-semibold">{occupiedCount} có khách</span>
             </div>
           </div>
-          <div className="flex-1 overflow-y-auto px-3 py-3 space-y-4 bg-slate-50/50">
-            {["A", "B", "C"].map(sec => (
-              <div key={sec}>
-                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2 px-1">
-                  Khu {sec} · Tầng {sec === "C" ? "2" : "1"}
-                </p>
-                <div className="grid grid-cols-3 gap-1.5">
-                  {tables.filter(t => t.section === sec).map(t => {
-                    const cfg = STATUS_CFG[t.status]
-                    const isSelected = t.id === selectedId
-                    const minutes = t.occupiedSince ? minutesSince(t.occupiedSince) : 0
-                    const overtime = minutes > 90
-                    const orderInfo = orders.find(o => o.tableId === t.id && o.status !== "paid")
-                    const pendingReady = orderInfo?.items.filter(i => i.status === "ready").length ?? 0
-                    return (
-                      <button
-                        key={t.id}
-                        onClick={() => selectTable(t)}
-                        className={cn(
-                          "relative rounded-xl border-2 p-2 text-left transition-all duration-150 active:scale-95",
-                          cfg.bg, cfg.ring, cfg.text,
-                          isSelected && "ring-2 ring-offset-2 ring-blue-500 scale-105 shadow-md",
-                          overtime && !isSelected && "ring-2 ring-amber-400"
-                        )}
-                      >
-                        {t.isVIP && (
-                          <Star className="w-2.5 h-2.5 absolute top-1.5 right-1.5 fill-amber-400 text-amber-400" />
-                        )}
-                        {pendingReady > 0 && (
-                          <span className="absolute -top-1 -right-1 w-4 h-4 bg-emerald-500 text-white text-[9px] font-bold rounded-full flex items-center justify-center">
-                            {pendingReady}
-                          </span>
-                        )}
-                        <div className="font-bold text-[13px] leading-tight">B{t.number}</div>
-                        <div className="text-[9px] opacity-60 mt-0.5">{t.capacity} chỗ</div>
-                        {t.status === "occupied" && minutes > 0 && (
-                          <div className={cn("text-[9px] font-semibold mt-0.5", overtime ? "text-amber-600" : "opacity-70")}>
-                            {overtime ? "⚠ " : ""}{minutes}p
-                          </div>
-                        )}
-                      </button>
-                    )
-                  })}
+          <div className="flex-1 overflow-y-auto px-4 py-4 space-y-3 bg-slate-50/50">
+            {["A", "B", "C"].map(sec => {
+              const sectionTables = tables.filter(t => t.section === sec)
+              const isCollapsed = collapsedSections.has(sec)
+              const sectionEmpty = sectionTables.filter(t => t.status === "empty").length
+              const sectionOccupied = sectionTables.filter(t => t.status === "occupied").length
+              return (
+                <div key={sec}>
+                  <button
+                    onClick={() => setCollapsedSections(prev => {
+                      const next = new Set(prev)
+                      if (next.has(sec)) next.delete(sec); else next.add(sec)
+                      return next
+                    })}
+                    className="w-full flex items-center justify-between mb-2.5 px-2 py-1.5 rounded-lg hover:bg-slate-100 transition-colors group"
+                  >
+                    <span className="flex items-center gap-1.5">
+                      {isCollapsed
+                        ? <ChevronRight className="w-3.5 h-3.5 text-slate-400 group-hover:text-slate-600" />
+                        : <ChevronDown className="w-3.5 h-3.5 text-slate-400 group-hover:text-slate-600" />}
+                      <span className="text-xs font-bold text-slate-500 uppercase tracking-widest">
+                        Khu {sec} · Tầng {sec === "C" ? "2" : "1"}
+                      </span>
+                    </span>
+                    <span className="flex items-center gap-1.5 text-[10px]">
+                      <span className="text-emerald-600 font-semibold">{sectionEmpty}</span>
+                      <span className="text-slate-300">·</span>
+                      <span className="text-sky-600 font-semibold">{sectionOccupied}</span>
+                      <span className="bg-slate-200 text-slate-600 px-1.5 py-0.5 rounded font-bold ml-1">
+                        {sectionTables.length}
+                      </span>
+                    </span>
+                  </button>
+                  {!isCollapsed && (
+                    <div className="grid grid-cols-3 gap-2">
+                      {sectionTables.map(t => {
+                        const cfg = STATUS_CFG[t.status]
+                        const isSelected = t.id === selectedId
+                        const minutes = t.occupiedSince ? minutesSince(t.occupiedSince) : 0
+                        const overtime = minutes > 90
+                        const orderInfo = orders.find(o => o.tableId === t.id && o.status !== "paid")
+                        const pendingReady = orderInfo?.items.filter(i => i.status === "ready").length ?? 0
+                        return (
+                          <button
+                            key={t.id}
+                            onClick={() => selectTable(t)}
+                            className={cn(
+                              "relative rounded-xl border-2 p-2.5 text-left transition-all duration-150 active:scale-95",
+                              cfg.bg, cfg.ring, cfg.text,
+                              isSelected && "ring-2 ring-offset-2 ring-blue-500 scale-105 shadow-md",
+                              overtime && !isSelected && "ring-2 ring-amber-400"
+                            )}
+                          >
+                            {t.isVIP && (
+                              <Star className="w-3 h-3 absolute top-2 right-2 fill-amber-400 text-amber-400" />
+                            )}
+                            {pendingReady > 0 && (
+                              <span className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-emerald-500 text-white text-[11px] font-bold rounded-full flex items-center justify-center">
+                                {pendingReady}
+                              </span>
+                            )}
+                            <div className="font-bold text-[17px] leading-tight">B{t.number}</div>
+                            <div className="text-[12px] opacity-60 mt-0.5">{t.capacity} chỗ</div>
+                            {t.status === "occupied" && minutes > 0 && (
+                              <div className={cn("text-[12px] font-semibold mt-0.5", overtime ? "text-amber-600" : "opacity-70")}>
+                                {overtime ? "⚠ " : ""}{minutes}p
+                              </div>
+                            )}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  )}
                 </div>
-              </div>
-            ))}
+              )
+            })}
           </div>
         </aside>
 
@@ -340,7 +388,7 @@ export default function POSPage() {
               value={menuSearch}
               onChange={e => setMenuSearch(e.target.value)}
               placeholder="Tìm món..."
-              className="w-32 border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs outline-none focus:border-blue-400 bg-white shrink-0"
+              className="w-64 border border-slate-200 rounded-lg px-3 py-1.5 text-sm outline-none focus:border-blue-400 bg-white shrink-0"
             />
           </div>
 
@@ -414,26 +462,26 @@ export default function POSPage() {
         </div>
 
         {/* ═══ RIGHT: Order panel ═══ */}
-        <aside className="w-[300px] bg-white flex flex-col shrink-0 border-l border-slate-100">
+        <aside className="w-[390px] bg-white flex flex-col shrink-0 border-l border-slate-100">
           {!selectedId ? (
-            <div className="flex-1 flex items-center justify-center text-slate-300 text-sm">
+            <div className="flex-1 flex items-center justify-center text-slate-300 text-base">
               <div className="text-center">
-                <Receipt className="w-10 h-10 mx-auto mb-2 opacity-30" />
+                <Receipt className="w-12 h-12 mx-auto mb-2.5 opacity-30" />
                 <p>Chưa chọn bàn</p>
               </div>
             </div>
           ) : (
             <>
               {/* Header */}
-              <div className="px-4 py-3 border-b border-slate-100">
+              <div className="px-5 py-4 border-b border-slate-100">
                 <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <div className={cn("w-8 h-8 rounded-lg flex items-center justify-center text-sm font-bold", STATUS_CFG[selectedTable?.status ?? "empty"].bg, STATUS_CFG[selectedTable?.status ?? "empty"].text)}>
+                  <div className="flex items-center gap-2.5">
+                    <div className={cn("w-10 h-10 rounded-lg flex items-center justify-center text-base font-bold", STATUS_CFG[selectedTable?.status ?? "empty"].bg, STATUS_CFG[selectedTable?.status ?? "empty"].text)}>
                       {selectedTable?.number}
                     </div>
                     <div>
-                      <p className="font-bold text-slate-800 text-sm leading-none">Bàn {selectedTable?.number}</p>
-                      <p className="text-[10px] text-slate-400 mt-0.5">{selectedTable?.capacity} chỗ · {STATUS_CFG[selectedTable?.status ?? "empty"].label}</p>
+                      <p className="font-bold text-slate-800 text-base leading-none">Bàn {selectedTable?.number}</p>
+                      <p className="text-xs text-slate-400 mt-1">{selectedTable?.capacity} chỗ · {STATUS_CFG[selectedTable?.status ?? "empty"].label}</p>
                     </div>
                   </div>
                   <div className="flex gap-1">
@@ -441,61 +489,70 @@ export default function POSPage() {
                       <button
                         onClick={() => setSplitBy(2)}
                         title="Chia hóa đơn"
-                        className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+                        className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
                       >
-                        <SplitSquareHorizontal className="w-4 h-4" />
+                        <SplitSquareHorizontal className="w-5 h-5" />
                       </button>
                     ) : (
-                      <span className="text-xs bg-blue-50 text-blue-600 px-2 py-1 rounded-lg font-medium">{splitBy} người</span>
+                      <span className="text-sm bg-blue-50 text-blue-600 px-2.5 py-1 rounded-lg font-medium">{splitBy} người</span>
                     )}
-                    <button onClick={() => setSelectedId(null)} className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-colors">
-                      <X className="w-4 h-4" />
+                    <button onClick={() => setSelectedId(null)} className="p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-colors">
+                      <X className="w-5 h-5" />
                     </button>
                   </div>
                 </div>
               </div>
 
               {/* Items */}
-              <div className="flex-1 overflow-y-auto px-3 py-2">
+              <div className="flex-1 overflow-y-auto px-4 py-3">
                 {/* Sent items */}
                 {sentItems.length > 0 && (
-                  <div className="mb-3">
-                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 px-1 flex items-center gap-1">
-                      <ChefHat className="w-3 h-3" />Đã gửi bếp
+                  <div className="mb-4">
+                    <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-2 px-1 flex items-center gap-1.5">
+                      <ChefHat className="w-3.5 h-3.5" />Đã gửi bếp
                     </p>
-                    <div className="space-y-1">
+                    <div className="space-y-1.5">
                       {sentItems.filter(i => i.status !== "cancelled").map(item => {
                         const cfg = ITEM_STATUS_CFG[item.status]
                         return (
                           <div key={item.id}
                             className={cn(
-                              "flex items-center gap-2 rounded-lg px-2.5 py-2 group",
+                              "flex items-center gap-2 rounded-lg px-3 py-2.5 group",
                               item.status === "ready" ? "bg-emerald-50 border border-emerald-200" : "bg-slate-50"
                             )}
                           >
                             <div className="flex-1 min-w-0">
-                              <p className={cn("text-xs font-semibold truncate", item.status === "ready" ? "text-emerald-800" : "text-slate-700")}>
+                              <p className={cn("text-sm font-semibold truncate", item.status === "ready" ? "text-emerald-800" : "text-slate-700")}>
                                 {item.quantity > 1 && <span className="mr-1 text-slate-500">×{item.quantity}</span>}
                                 {item.menuItem.name}
                               </p>
                               {item.allergyNotes && (
-                                <p className="text-[9px] text-red-500 flex items-center gap-0.5 mt-0.5">
-                                  <AlertCircle className="w-2 h-2" />{item.allergyNotes}
+                                <p className="text-[11px] text-red-500 flex items-center gap-0.5 mt-0.5">
+                                  <AlertCircle className="w-2.5 h-2.5" />{item.allergyNotes}
                                 </p>
                               )}
-                              {item.notes && <p className="text-[9px] text-slate-400 mt-0.5 italic">{item.notes}</p>}
+                              {item.notes && <p className="text-[11px] text-slate-400 mt-0.5 italic">{item.notes}</p>}
                             </div>
                             <div className="flex items-center gap-1.5 shrink-0">
-                              <span className={cn("text-[9px] px-1.5 py-0.5 rounded font-semibold", cfg.cls)}>
+                              <span className={cn("text-[11px] px-2 py-0.5 rounded font-semibold", cfg.cls)}>
                                 {cfg.label}
                               </span>
+                              {item.status === "pending" && currentOrder && (
+                                <button
+                                  onClick={() => cancelSentItem(currentOrder.id, item.id)}
+                                  className="w-6 h-6 bg-red-100 hover:bg-red-500 hover:text-white text-red-500 rounded-full flex items-center justify-center transition-colors"
+                                  title="Hủy món"
+                                >
+                                  <X className="w-3.5 h-3.5" />
+                                </button>
+                              )}
                               {item.status === "ready" && currentOrder && (
                                 <button
                                   onClick={() => markServed(currentOrder.id, item.id)}
-                                  className="w-5 h-5 bg-emerald-500 hover:bg-emerald-600 text-white rounded-full flex items-center justify-center transition-colors"
+                                  className="w-6 h-6 bg-emerald-500 hover:bg-emerald-600 text-white rounded-full flex items-center justify-center transition-colors"
                                   title="Đánh dấu đã phục vụ"
                                 >
-                                  <CheckCircle2 className="w-3 h-3" />
+                                  <CheckCircle2 className="w-3.5 h-3.5" />
                                 </button>
                               )}
                             </div>
@@ -509,40 +566,40 @@ export default function POSPage() {
                 {/* Draft items */}
                 {draftItems.length > 0 && (
                   <div>
-                    <p className="text-[10px] font-bold text-blue-500 uppercase tracking-widest mb-1.5 px-1 flex items-center gap-1">
-                      <Plus className="w-3 h-3" />Món mới · chưa gửi
+                    <p className="text-xs font-bold text-blue-500 uppercase tracking-widest mb-2 px-1 flex items-center gap-1.5">
+                      <Plus className="w-3.5 h-3.5" />Món mới · chưa gửi
                     </p>
-                    <div className="space-y-1">
+                    <div className="space-y-1.5">
                       {draftItems.map(item => (
-                        <div key={item.id} className="flex items-center gap-2 bg-blue-50 border border-blue-200 rounded-lg px-2.5 py-2">
+                        <div key={item.id} className="flex items-center gap-2 bg-blue-50 border border-blue-200 rounded-lg px-3 py-2.5">
                           <div className="flex-1 min-w-0">
-                            <p className="text-xs font-semibold text-blue-900 truncate">{item.menuItem.name}</p>
-                            {item.allergyNotes && <p className="text-[9px] text-red-500">{item.allergyNotes}</p>}
-                            {item.notes && <p className="text-[9px] text-blue-500 italic">{item.notes}</p>}
+                            <p className="text-sm font-semibold text-blue-900 truncate">{item.menuItem.name}</p>
+                            {item.allergyNotes && <p className="text-[11px] text-red-500">{item.allergyNotes}</p>}
+                            {item.notes && <p className="text-[11px] text-blue-500 italic">{item.notes}</p>}
                           </div>
                           <div className="flex items-center gap-1 shrink-0">
                             <button
                               onClick={() => changeDraftQty(item.id, -1)}
-                              className="w-5 h-5 rounded-md bg-blue-200 hover:bg-blue-300 text-blue-800 flex items-center justify-center transition-colors"
+                              className="w-6 h-6 rounded-md bg-blue-200 hover:bg-blue-300 text-blue-800 flex items-center justify-center transition-colors"
                             >
-                              <Minus className="w-2.5 h-2.5" />
+                              <Minus className="w-3 h-3" />
                             </button>
-                            <span className="w-5 text-center text-xs font-bold text-blue-800">{item.quantity}</span>
+                            <span className="w-6 text-center text-sm font-bold text-blue-800">{item.quantity}</span>
                             <button
                               onClick={() => changeDraftQty(item.id, +1)}
-                              className="w-5 h-5 rounded-md bg-blue-200 hover:bg-blue-300 text-blue-800 flex items-center justify-center transition-colors"
+                              className="w-6 h-6 rounded-md bg-blue-200 hover:bg-blue-300 text-blue-800 flex items-center justify-center transition-colors"
                             >
-                              <Plus className="w-2.5 h-2.5" />
+                              <Plus className="w-3 h-3" />
                             </button>
                           </div>
                           <button
                             onClick={() => { setNoteTarget(item); setNoteText(item.notes ?? ""); setAllergyText(item.allergyNotes ?? "") }}
-                            className="text-[9px] text-blue-500 hover:text-blue-700 px-1 font-medium shrink-0"
+                            className="text-[11px] text-blue-500 hover:text-blue-700 px-1 font-medium shrink-0"
                           >
                             Ghi chú
                           </button>
                           <button onClick={() => removeDraftItem(item.id)} className="text-red-400 hover:text-red-600 shrink-0">
-                            <Trash2 className="w-3 h-3" />
+                            <Trash2 className="w-3.5 h-3.5" />
                           </button>
                         </div>
                       ))}
@@ -551,42 +608,42 @@ export default function POSPage() {
                 )}
 
                 {allItems.length === 0 && (
-                  <div className="flex flex-col items-center justify-center h-28 text-slate-300">
-                    <UtensilsCrossed className="w-8 h-8 mb-2 opacity-40" />
-                    <p className="text-xs">Chưa có món — chọn từ menu</p>
+                  <div className="flex flex-col items-center justify-center h-36 text-slate-300">
+                    <UtensilsCrossed className="w-10 h-10 mb-2.5 opacity-40" />
+                    <p className="text-sm">Chưa có món — chọn từ menu</p>
                   </div>
                 )}
               </div>
 
               {/* Voucher */}
-              <div className="px-3 py-2 border-t border-slate-100">
-                <div className="flex gap-1.5">
+              <div className="px-4 py-3 border-t border-slate-100">
+                <div className="flex gap-2">
                   <input
                     value={voucherInput}
                     onChange={e => setVoucherInput(e.target.value)}
                     onKeyDown={e => e.key === "Enter" && applyVoucher()}
                     placeholder="Mã khuyến mãi"
-                    className="flex-1 border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs outline-none focus:border-blue-400 bg-slate-50"
+                    className="flex-1 border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-400 bg-slate-50"
                   />
                   <button
                     onClick={applyVoucher}
-                    className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors"
+                    className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-sm font-semibold flex items-center gap-1 transition-colors"
                   >
-                    <Tag className="w-3 h-3" />Áp
+                    <Tag className="w-3.5 h-3.5" />Áp
                   </button>
                 </div>
                 {appliedVoucher && (
-                  <div className="flex items-center justify-between mt-1.5">
-                    <p className="text-[10px] text-emerald-600 flex items-center gap-1">
-                      <CheckCircle2 className="w-3 h-3" />Mã {appliedVoucher} — -{formatCurrency(discountAmt)}
+                  <div className="flex items-center justify-between mt-2">
+                    <p className="text-xs text-emerald-600 flex items-center gap-1">
+                      <CheckCircle2 className="w-3.5 h-3.5" />Mã {appliedVoucher} — -{formatCurrency(discountAmt)}
                     </p>
-                    <button onClick={() => setAppliedVoucher("")} className="text-[10px] text-slate-400 hover:text-red-500">✕ Bỏ</button>
+                    <button onClick={() => setAppliedVoucher("")} className="text-xs text-slate-400 hover:text-red-500">✕ Bỏ</button>
                   </div>
                 )}
               </div>
 
               {/* Bill summary */}
-              <div className="px-3 py-2 border-t border-slate-100 bg-slate-50 text-[11px] space-y-1">
+              <div className="px-4 py-3 border-t border-slate-100 bg-slate-50 text-sm space-y-1.5">
                 <div className="flex justify-between text-slate-500"><span>Tạm tính</span><span>{formatCurrency(bill.subtotal)}</span></div>
                 <div className="flex justify-between text-slate-500"><span>VAT 8%</span><span>{formatCurrency(bill.vat)}</span></div>
                 <div className="flex justify-between text-slate-500"><span>Phí dịch vụ 5%</span><span>{formatCurrency(bill.service)}</span></div>
@@ -599,29 +656,29 @@ export default function POSPage() {
                     <span>{formatCurrency(Math.ceil(bill.total / splitBy))}</span>
                   </div>
                 )}
-                <div className="flex justify-between font-bold text-slate-800 text-sm pt-1.5 border-t border-slate-200 mt-1">
+                <div className="flex justify-between font-bold text-slate-800 text-base pt-2 border-t border-slate-200 mt-1.5">
                   <span>Tổng cộng</span>
                   <span className="text-blue-700">{formatCurrency(bill.total)}</span>
                 </div>
               </div>
 
               {/* Action buttons */}
-              <div className="p-3 space-y-2">
+              <div className="p-4 space-y-2.5">
                 {draftItems.length > 0 && (
                   <button
                     onClick={sendToKitchen}
-                    className="w-full bg-orange-500 hover:bg-orange-600 text-white rounded-xl py-2.5 text-sm font-bold flex items-center justify-center gap-2 transition-colors shadow-sm active:scale-[0.98]"
+                    className="w-full bg-orange-500 hover:bg-orange-600 text-white rounded-xl py-3 text-base font-bold flex items-center justify-center gap-2 transition-colors shadow-sm active:scale-[0.98]"
                   >
-                    <Flame className="w-4 h-4" />
+                    <Flame className="w-5 h-5" />
                     Gửi bếp ({newItemCount} món)
                   </button>
                 )}
                 <button
                   onClick={() => setShowPay(true)}
                   disabled={allItems.length === 0}
-                  className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-30 text-white rounded-xl py-2.5 text-sm font-bold flex items-center justify-center gap-2 transition-colors shadow-sm active:scale-[0.98]"
+                  className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-30 text-white rounded-xl py-3 text-base font-bold flex items-center justify-center gap-2 transition-colors shadow-sm active:scale-[0.98]"
                 >
-                  <Receipt className="w-4 h-4" />
+                  <Receipt className="w-5 h-5" />
                   Thanh toán {allItems.length > 0 ? formatCurrency(bill.total) : ""}
                 </button>
               </div>
@@ -788,7 +845,7 @@ export default function POSPage() {
               </div>
 
               {/* Payment method */}
-              <div className="mb-5">
+              <div className="mb-4">
                 <label className="text-xs font-bold text-slate-600 mb-2 block">Phương thức thanh toán</label>
                 <div className="grid grid-cols-3 gap-2">
                   {(["cash", "card", "e-wallet"] as const).map(m => (
@@ -804,6 +861,56 @@ export default function POSPage() {
                     </button>
                   ))}
                 </div>
+              </div>
+
+              {/* Rating */}
+              <div className="mb-3">
+                <label className="text-xs font-bold text-slate-600 mb-2 block">Đánh giá phục vụ</label>
+                <div className="flex items-center gap-1.5">
+                  {[1, 2, 3, 4, 5].map(n => {
+                    const filled = (hoverRating || rating) >= n
+                    return (
+                      <button
+                        key={n}
+                        type="button"
+                        onClick={() => setRating(n === rating ? 0 : n)}
+                        onMouseEnter={() => setHoverRating(n)}
+                        onMouseLeave={() => setHoverRating(0)}
+                        className="transition-transform hover:scale-110 active:scale-95"
+                        title={`${n} sao`}
+                      >
+                        <Star
+                          className={cn(
+                            "w-7 h-7 transition-colors",
+                            filled ? "fill-amber-400 text-amber-400" : "fill-slate-100 text-slate-300"
+                          )}
+                        />
+                      </button>
+                    )
+                  })}
+                  {(hoverRating || rating) > 0 && (
+                    <span className="ml-2 text-sm font-medium text-slate-600">
+                      {((hoverRating || rating) === 5) ? "Tuyệt vời" :
+                       ((hoverRating || rating) === 4) ? "Hài lòng" :
+                       ((hoverRating || rating) === 3) ? "Bình thường" :
+                       ((hoverRating || rating) === 2) ? "Chưa tốt" : "Kém"}
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* Feedback */}
+              <div className="mb-5">
+                <label className="text-xs font-bold text-slate-600 mb-2 block">
+                  Phản hồi <span className="font-normal text-slate-400">(không bắt buộc)</span>
+                </label>
+                <textarea
+                  value={feedback}
+                  onChange={e => setFeedback(e.target.value)}
+                  rows={2}
+                  placeholder="Lời nhắn cho nhà hàng — món ăn, dịch vụ, không gian..."
+                  className="w-full border border-slate-200 focus:border-blue-400 rounded-xl px-3 py-2 text-sm outline-none resize-none bg-white"
+                />
               </div>
 
               <div className="flex gap-3">

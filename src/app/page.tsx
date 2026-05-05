@@ -58,7 +58,7 @@ const modules = [
 
 export default function Home() {
   return (
-    <main className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-slate-100 flex flex-col items-center justify-center p-8">
+    <main className="h-screen overflow-hidden bg-gradient-to-br from-slate-50 via-white to-slate-100 flex flex-col items-center justify-center p-8">
       {/* Subtle background circles */}
       <div className="absolute top-[-80px] left-[-80px] w-[400px] h-[400px] rounded-full bg-blue-100/40 blur-[80px] pointer-events-none" />
       <div className="absolute bottom-[-80px] right-[-80px] w-[350px] h-[350px] rounded-full bg-violet-100/40 blur-[80px] pointer-events-none" />
@@ -112,11 +112,6 @@ export default function Home() {
         })}
       </div>
 
-      {/* Footer */}
-      <div className="mt-12 z-10 flex items-center gap-2">
-        <div className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-        <p className="text-xs text-slate-400">Demo data — không kết nối backend thực</p>
-      </div>
     </main>
   )
 }
