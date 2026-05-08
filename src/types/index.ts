@@ -1,4 +1,4 @@
-export type TableStatus = "empty" | "occupied" | "reserved" | "needs-cleaning" | "waiting"
+export type TableStatus = "empty" | "occupied" | "reserved" | "needs-cleaning"
 export type OrderItemStatus = "pending" | "cooking" | "ready" | "served" | "cancelled"
 export type OrderStatus = "open" | "sent" | "partial" | "complete" | "paid"
 export type PaymentMethod = "cash" | "card" | "e-wallet"

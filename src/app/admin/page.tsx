@@ -1,24 +1,31 @@
 "use client"
 
-import { useState, useMemo } from "react"
+import { useState, useMemo, useEffect, useCallback } from "react"
 import Link from "next/link"
+import { useRouter } from "next/navigation"
 import {
   ChevronLeft, LayoutDashboard, UtensilsCrossed, Package,
   BarChart3, Users, ClipboardList, AlertTriangle, TrendingUp,
   Edit2, Trash2, Plus, Download, ToggleLeft, ToggleRight,
   AlertCircle, CheckCircle2, Search, X, ChevronRight,
-  ArrowUpRight, Minus, Phone,
+  ArrowUpRight, Minus, Phone, Loader2, LogOut, RefreshCw,
 } from "lucide-react"
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
   Cell, LineChart, Line, CartesianGrid,
 } from "recharts"
 import {
-  MENU_ITEMS, INGREDIENTS, STAFF, AUDIT_LOGS,
+  INGREDIENTS, STAFF, AUDIT_LOGS,
   REVENUE_BY_HOUR, TOP_DISHES,
 } from "@/lib/mock-data"
 import { formatCurrency, cn } from "@/lib/utils"
 import type { MenuItem, IngredientItem, StaffMember } from "@/types"
+import { MenuApi, AdminApi } from "@/lib/api"
+import { menuItemFromApi } from "@/lib/adapters"
+import { useAuthGuard } from "@/hooks/useAuthGuard"
+import { clearToken } from "@/lib/auth"
+import { ApiError } from "@/lib/api/client"
+import type { CategoryApi } from "@/types/api"
 
 type Tab = "overview" | "menu" | "inventory" | "reports" | "staff" | "audit"
 
@@ -71,16 +78,121 @@ function CustomTooltip({ active, payload, label }: any) {
 
 // ─── Main ────────────────────────────────────────────────────────────────────
 export default function AdminPage() {
+  const router = useRouter()
+  const ready  = useAuthGuard()
+
   const [tab, setTab] = useState<Tab>("overview")
-  const [menuItems, setMenuItems] = useState<MenuItem[]>(MENU_ITEMS)
+  const [menuItems, setMenuItems] = useState<MenuItem[]>([])
+  const [categories, setCategories] = useState<CategoryApi[]>([])
+  const [menuLoading, setMenuLoading] = useState(true)
+  const [menuError, setMenuError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
   const [ingredients, setIngredients] = useState<IngredientItem[]>(INGREDIENTS)
   const [staff] = useState<StaffMember[]>(STAFF)
   const [editItem, setEditItem] = useState<MenuItem | null>(null)
+  const [editItemCategoryId, setEditItemCategoryId] = useState<string>("")
   const [menuSearch, setMenuSearch] = useState("")
   const [auditAction, setAuditAction] = useState("")
   const [auditStaffId, setAuditStaffId] = useState("")
   const [staffModal, setStaffModal] = useState(false)
   const [newStaff, setNewStaff] = useState({ name: "", phone: "", role: "server" as StaffMember["role"], shift: "Ca sáng" })
+
+  // ── Load menu từ BE ──
+  const loadMenu = useCallback(async () => {
+    setMenuLoading(true)
+    setMenuError(null)
+    try {
+      const [items, cats] = await Promise.all([
+        MenuApi.listItems(),
+        MenuApi.listCategories(),
+      ])
+      setMenuItems(items.map(menuItemFromApi))
+      setCategories(cats)
+    } catch (err) {
+      if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+        clearToken()
+        router.replace("/login?redirect=/admin")
+        return
+      }
+      setMenuError(err instanceof ApiError ? err.message : "Không tải được thực đơn.")
+    } finally {
+      setMenuLoading(false)
+    }
+  }, [router])
+
+  useEffect(() => { if (ready) loadMenu() }, [ready, loadMenu])
+
+  const logout = useCallback(() => {
+    clearToken()
+    router.replace("/login")
+  }, [router])
+
+  // Map tên category → id (để gửi POST/PUT lên BE).
+  const categoryIdByName = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const c of categories) m.set(c.name, c.id)
+    return m
+  }, [categories])
+
+  // ── Toggle availability (BE chưa có endpoint riêng → dùng PUT /items/{id}) ──
+  const toggleAvailable = useCallback(async (m: MenuItem) => {
+    setBusy(true)
+    const newVal = !m.available
+    setMenuItems(prev => prev.map(i => i.id === m.id ? { ...i, available: newVal } : i))
+    try {
+      const catId = categoryIdByName.get(m.category)
+      if (!catId) throw new Error("Không tìm thấy categoryId tương ứng")
+      await MenuApi.updateItem(m.id, {
+        name: m.name,
+        description: m.description,
+        price: m.price,
+        categoryId: catId,
+        preparationTime: m.estimatedMinutes,
+        allergens: m.allergens,
+        isAvailable: newVal,
+      })
+    } catch (err) {
+      console.error(err)
+      // rollback
+      await loadMenu()
+    } finally { setBusy(false) }
+  }, [categoryIdByName, loadMenu])
+
+  // ── Save edit ──
+  const saveEdit = useCallback(async () => {
+    if (!editItem) return
+    setBusy(true)
+    try {
+      const catId = editItemCategoryId || categoryIdByName.get(editItem.category)
+      if (!catId) throw new Error("Vui lòng chọn category")
+      await MenuApi.updateItem(editItem.id, {
+        name: editItem.name,
+        description: editItem.description,
+        price: editItem.price,
+        categoryId: catId,
+        preparationTime: editItem.estimatedMinutes,
+        allergens: editItem.allergens,
+        isAvailable: editItem.available,
+      })
+      setEditItem(null)
+      setEditItemCategoryId("")
+      await loadMenu()
+    } catch (err) {
+      alert(err instanceof ApiError ? err.message : String(err))
+    } finally { setBusy(false) }
+  }, [editItem, editItemCategoryId, categoryIdByName, loadMenu])
+
+  // ── Delete ──
+  const deleteItem = useCallback(async (m: MenuItem) => {
+    if (!confirm(`Xóa món "${m.name}"?`)) return
+    setBusy(true)
+    try {
+      await MenuApi.deleteItem(m.id)
+      await loadMenu()
+    } catch (err) {
+      alert(err instanceof ApiError ? err.message : String(err))
+    } finally { setBusy(false) }
+  }, [loadMenu])
 
   // KPIs
   const totalRevenue = useMemo(() => REVENUE_BY_HOUR.reduce((s, h) => s + h.revenue, 0), [])
@@ -101,6 +213,8 @@ export default function AdminPage() {
     ),
     [auditAction, auditStaffId]
   )
+
+  if (!ready) return null
 
   return (
     <div className="h-screen flex bg-slate-50 overflow-hidden">
@@ -144,19 +258,55 @@ export default function AdminPage() {
             )
           })}
         </nav>
-        <div className="px-4 py-3 border-t border-slate-100">
+        <div className="px-4 py-3 border-t border-slate-100 space-y-2">
           <div className="flex items-center gap-2">
             <div className="w-7 h-7 rounded-full bg-violet-100 flex items-center justify-center text-violet-700 text-xs font-bold">QH</div>
-            <div>
+            <div className="flex-1">
               <p className="text-xs font-semibold text-slate-700">Quang Huy</p>
               <p className="text-[10px] text-slate-400">Manager · Ca chiều</p>
             </div>
           </div>
+          <button
+            onClick={logout}
+            className="w-full flex items-center justify-center gap-1.5 py-1.5 text-xs text-slate-500 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+          >
+            <LogOut className="w-3 h-3" />Đăng xuất
+          </button>
         </div>
       </aside>
 
       {/* ── Main content ── */}
       <main className="flex-1 overflow-y-auto bg-slate-50">
+
+        {/* Banner cho các tab chưa wire BE */}
+        {tab !== "menu" && (
+          <div className="px-6 pt-4">
+            <div className="flex items-start gap-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-800">
+              <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+              <div>
+                Tab này (<b>{NAV.find(n => n.id === tab)?.label}</b>) đang dùng <b>dữ liệu mock</b>. BE
+                {tab === "inventory" && " cần inventory-service (chưa code)."}
+                {tab === "reports" && " cần reporting-service (chưa code)."}
+                {tab === "audit" && " cần audit-log endpoint (admin-service đã có entity nhưng chưa expose)."}
+                {tab === "staff" && " có /api/v1/admin/users nhưng schema khác (cần ROLE_ADMIN JWT)."}
+                {tab === "overview" && " cần aggregate dashboard endpoint."}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Banner lỗi tải menu */}
+        {tab === "menu" && menuError && (
+          <div className="px-6 pt-4">
+            <div className="flex items-start gap-2 px-3 py-2 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700">
+              <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+              <div className="flex-1">
+                Không tải được thực đơn từ <b>menu-service</b>: {menuError}
+              </div>
+              <button onClick={loadMenu} className="text-red-600 font-semibold hover:underline shrink-0">Thử lại</button>
+            </div>
+          </div>
+        )}
 
         {/* ═══ OVERVIEW ═══ */}
         {tab === "overview" && (
@@ -344,9 +494,10 @@ export default function AdminPage() {
                       </td>
                       <td className="px-4 py-3">
                         <button
-                          onClick={() => setMenuItems(prev => prev.map(i => i.id === m.id ? { ...i, available: !i.available } : i))}
+                          disabled={busy}
+                          onClick={() => toggleAvailable(m)}
                           className={cn(
-                            "flex items-center gap-1.5 text-xs font-semibold transition-colors px-2 py-1 rounded-lg",
+                            "flex items-center gap-1.5 text-xs font-semibold transition-colors px-2 py-1 rounded-lg disabled:opacity-50",
                             m.available ? "text-emerald-600 hover:bg-emerald-50" : "text-red-500 hover:bg-red-50"
                           )}
                         >
@@ -356,12 +507,16 @@ export default function AdminPage() {
                       <td className="px-4 py-3">
                         <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                           <button
-                            onClick={() => setEditItem(m)}
+                            onClick={() => { setEditItem(m); setEditItemCategoryId(categoryIdByName.get(m.category) ?? "") }}
                             className="p-1.5 text-slate-400 hover:text-violet-600 hover:bg-violet-50 rounded-lg transition-colors"
                           >
                             <Edit2 className="w-3.5 h-3.5" />
                           </button>
-                          <button className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors">
+                          <button
+                            onClick={() => deleteItem(m)}
+                            disabled={busy}
+                            className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors disabled:opacity-50"
+                          >
                             <Trash2 className="w-3.5 h-3.5" />
                           </button>
                         </div>
@@ -842,11 +997,17 @@ export default function AdminPage() {
                 <div>
                   <label className="text-xs font-bold text-slate-600 mb-1.5 block">Danh mục</label>
                   <select
-                    value={editItem.category}
-                    onChange={e => setEditItem({ ...editItem, category: e.target.value })}
+                    value={editItemCategoryId || (categoryIdByName.get(editItem.category) ?? "")}
+                    onChange={e => {
+                      const id = e.target.value
+                      setEditItemCategoryId(id)
+                      const c = categories.find(cat => cat.id === id)
+                      if (c) setEditItem({ ...editItem, category: c.name })
+                    }}
                     className="w-full border border-slate-200 focus:border-violet-400 rounded-xl px-3 py-2.5 text-sm outline-none"
                   >
-                    {["Khai vị", "Món chính", "Tráng miệng", "Đồ uống"].map(c => <option key={c}>{c}</option>)}
+                    <option value="">— chọn danh mục —</option>
+                    {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
                   </select>
                 </div>
                 <div>
@@ -855,6 +1016,7 @@ export default function AdminPage() {
                     value={editItem.station}
                     onChange={e => setEditItem({ ...editItem, station: e.target.value as any })}
                     className="w-full border border-slate-200 focus:border-violet-400 rounded-xl px-3 py-2.5 text-sm outline-none"
+                    title="Trạm bếp suy ra từ tên/category — chỉ hiển thị trên FE, không lưu xuống BE"
                   >
                     {["Nướng", "Chiên", "Tráng miệng", "Bar", "Lạnh"].map(s => <option key={s}>{s}</option>)}
                   </select>
@@ -873,14 +1035,13 @@ export default function AdminPage() {
               </label>
             </div>
             <div className="flex gap-3 mt-6">
-              <button onClick={() => setEditItem(null)} className="flex-1 py-2.5 border border-slate-200 rounded-xl text-sm font-medium text-slate-600 hover:bg-slate-50">Hủy</button>
+              <button onClick={() => { setEditItem(null); setEditItemCategoryId("") }} className="flex-1 py-2.5 border border-slate-200 rounded-xl text-sm font-medium text-slate-600 hover:bg-slate-50">Hủy</button>
               <button
-                onClick={() => {
-                  setMenuItems(prev => prev.map(m => m.id === editItem.id ? editItem : m))
-                  setEditItem(null)
-                }}
-                className="flex-1 py-2.5 bg-violet-600 hover:bg-violet-700 text-white rounded-xl text-sm font-bold transition-colors"
+                disabled={busy}
+                onClick={saveEdit}
+                className="flex-1 py-2.5 bg-violet-600 hover:bg-violet-700 disabled:opacity-50 text-white rounded-xl text-sm font-bold transition-colors flex items-center justify-center gap-2"
               >
+                {busy && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
                 Lưu thay đổi
               </button>
             </div>

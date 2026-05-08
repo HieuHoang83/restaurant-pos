@@ -2,15 +2,23 @@
 
 import { useState, useEffect, useCallback, useMemo } from "react"
 import Link from "next/link"
+import { useRouter } from "next/navigation"
 import {
   ChevronLeft, ConciergeBell, Plus, X, Clock, Phone,
   MessageSquare, Users, Calendar, Bell, AlertCircle,
   CheckCircle2, UserPlus, Timer, Star, MapPin,
-  ChevronRight, Send,
+  ChevronRight, Send, Loader2, LogOut, RefreshCw,
 } from "lucide-react"
-import { TABLES, RESERVATIONS, WAITLIST } from "@/lib/mock-data"
 import { minutesSince, formatTime, formatPhone, cn } from "@/lib/utils"
 import type { Table, Reservation, WaitlistEntry, TableStatus } from "@/types"
+import { TablesApi, ReservationsApi, WaitlistApi } from "@/lib/api"
+import {
+  tableFromApi, reservationFromApi, waitlistFromApi, tableStatusToApi,
+} from "@/lib/adapters"
+import { useAuthGuard } from "@/hooks/useAuthGuard"
+import { useRealtime, SSE_URLS } from "@/hooks/useRealtime"
+import { clearToken } from "@/lib/auth"
+import { ApiError } from "@/lib/api/client"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type Panel = "map" | "reservations" | "waitlist"
@@ -24,14 +32,20 @@ const TABLE_CFG: Record<TableStatus, {
   occupied:        { bg: "bg-sky-50",      border: "border-sky-200",      text: "text-sky-700",     dot: "bg-sky-500",      dotRing: "ring-sky-200",      label: "Có khách", labelColor: "bg-sky-100 text-sky-700"          },
   reserved:        { bg: "bg-amber-50",    border: "border-amber-200",    text: "text-amber-700",   dot: "bg-amber-500",    dotRing: "ring-amber-200",    label: "Đặt trước",labelColor: "bg-amber-100 text-amber-700"      },
   "needs-cleaning":{ bg: "bg-red-50",      border: "border-red-200",      text: "text-red-600",     dot: "bg-red-500",      dotRing: "ring-red-200",      label: "Cần dọn",  labelColor: "bg-red-100 text-red-600"          },
-  waiting:         { bg: "bg-violet-50",   border: "border-violet-200",   text: "text-violet-700",  dot: "bg-violet-500",   dotRing: "ring-violet-200",   label: "Chờ dọn",  labelColor: "bg-violet-100 text-violet-700"    },
 }
 
 // ─── Main ────────────────────────────────────────────────────────────────────
 export default function HostPage() {
-  const [tables, setTables]             = useState(TABLES)
-  const [reservations, setReservations] = useState<Reservation[]>(RESERVATIONS)
-  const [waitlist, setWaitlist]         = useState<WaitlistEntry[]>(WAITLIST)
+  const router = useRouter()
+  const ready  = useAuthGuard()
+
+  const [tables, setTables]             = useState<Table[]>([])
+  const [reservations, setReservations] = useState<Reservation[]>([])
+  const [waitlist, setWaitlist]         = useState<WaitlistEntry[]>([])
+  const [loading, setLoading]           = useState(true)
+  const [refreshing, setRefreshing]     = useState(false)
+  const [loadError, setLoadError]       = useState<string | null>(null)
+  const [busy, setBusy]                 = useState(false)
   const [panel, setPanel]               = useState<Panel>("map")
   const [selectedId, setSelectedId]     = useState<string | null>(null)
 
@@ -48,16 +62,42 @@ export default function HostPage() {
   // New waitlist form
   const [waitForm, setWaitForm] = useState({ guestName: "", phone: "", partySize: 2 })
 
-  // Tick for ETA updates
-  useEffect(() => {
-    const t = setInterval(() => {
-      setWaitlist(prev => prev.map(w => ({
-        ...w,
-        estimatedWaitMinutes: Math.max(0, w.estimatedWaitMinutes - 1)
-      })))
-    }, 60000)
-    return () => clearInterval(t)
-  }, [])
+  // ── Load all from BE ──
+  const loadAll = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true)
+    else setRefreshing(true)
+    setLoadError(null)
+    try {
+      const [t, r, w] = await Promise.all([
+        TablesApi.list(),
+        ReservationsApi.list(),
+        WaitlistApi.list(),
+      ])
+      setTables(t.map(tableFromApi))
+      setReservations(r.map(reservationFromApi))
+      setWaitlist(w.map(waitlistFromApi))
+    } catch (err) {
+      if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+        clearToken()
+        router.replace("/login?redirect=/host")
+        return
+      }
+      setLoadError(err instanceof ApiError ? err.message : "Không kết nối được tới máy chủ.")
+    } finally {
+      setLoading(false)
+      setRefreshing(false)
+    }
+  }, [router])
+
+  useEffect(() => { if (ready) loadAll() }, [ready, loadAll])
+
+  // Realtime: SSE từ table-service (tables/reservations/waitlist) — refetch khi có event.
+  useRealtime(ready ? [SSE_URLS.TABLES] : [], () => loadAll(true))
+
+  const logout = useCallback(() => {
+    clearToken()
+    router.replace("/login")
+  }, [router])
 
   // ── Derived ──
   const selectedTable = useMemo(() => tables.find(t => t.id === selectedId) ?? null, [tables, selectedId])
@@ -71,68 +111,169 @@ export default function HostPage() {
   const confirmedRes = useMemo(() => reservations.filter(r => r.status === "confirmed"), [reservations])
   const unnotified   = useMemo(() => waitlist.filter(w => !w.notified && emptyTables.some(t => t.capacity >= w.partySize)), [waitlist, emptyTables])
 
-  // ── Actions ──
-  const seatGuest = useCallback(() => {
+  // ── Actions ── (gọi BE)
+  const seatGuest = useCallback(async () => {
     if (!seatModal) return
-    setTables(prev => prev.map(t =>
-      t.id === seatModal.tableId
-        ? { ...t, status: "occupied" as const, occupiedSince: new Date(), isVIP: seatVIP || t.isVIP }
-        : t
-    ))
-    setSeatModal(null)
-    setSeatVIP(false)
-  }, [seatModal, seatVIP])
+    setBusy(true)
+    try {
+      // BE: gọi seat endpoint với source=WALK_IN.
+      await TablesApi.seat({ tableId: seatModal.tableId, source: "WALK_IN" })
+      setSeatModal(null)
+      setSeatVIP(false)
+      await loadAll(true)
+    } catch (err) {
+      alert(err instanceof ApiError ? err.message : "Lỗi xếp khách")
+    } finally { setBusy(false) }
+  }, [seatModal, loadAll])
 
-  const addReservation = useCallback(() => {
+  const addReservation = useCallback(async () => {
     if (!resForm.guestName || !resForm.phone) return
-    const [h, m] = resForm.time.split(":").map(Number)
-    const dt = new Date(); dt.setHours(h, m, 0, 0)
-    setReservations(prev => [...prev, {
-      id: `r-${Date.now()}`,
-      guestName: resForm.guestName, phone: resForm.phone,
-      partySize: resForm.partySize, dateTime: dt,
-      notes: resForm.notes, status: "confirmed", confirmationSent: false,
-    }])
-    setShowAddRes(false)
-    setResForm({ guestName: "", phone: "", partySize: 2, time: "19:00", notes: "" })
-  }, [resForm])
+    setBusy(true)
+    try {
+      const [h, m] = resForm.time.split(":").map(Number)
+      const dt = new Date(); dt.setHours(h, m, 0, 0)
+      // BE yêu cầu future date — nếu giờ chọn đã qua trong hôm nay, đẩy sang ngày mai.
+      if (dt.getTime() <= Date.now()) dt.setDate(dt.getDate() + 1)
+      // ISO không có timezone (BE format yyyy-MM-dd'T'HH:mm:ss).
+      const pad = (n: number) => String(n).padStart(2, "0")
+      const isoLocal = `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())}T${pad(dt.getHours())}:${pad(dt.getMinutes())}:00`
+      await ReservationsApi.create({
+        customerName: resForm.guestName,
+        customerPhone: resForm.phone,
+        partySize: resForm.partySize,
+        reservationTime: isoLocal,
+        notes: resForm.notes || undefined,
+      })
+      setShowAddRes(false)
+      setResForm({ guestName: "", phone: "", partySize: 2, time: "19:00", notes: "" })
+      await loadAll(true)
+    } catch (err) {
+      alert(err instanceof ApiError ? err.message : "Lỗi tạo đặt bàn")
+    } finally { setBusy(false) }
+  }, [resForm, loadAll])
 
-  const addWaitlistEntry = useCallback(() => {
+  const addWaitlistEntry = useCallback(async () => {
     if (!waitForm.guestName || !waitForm.phone) return
-    const avail = emptyTables.filter(t => t.capacity >= waitForm.partySize)
-    const eta = avail.length > 0 ? 5 : 15 + waitlist.length * 8
-    setWaitlist(prev => [...prev, {
-      id: `w-${Date.now()}`,
-      guestName: waitForm.guestName, phone: waitForm.phone,
-      partySize: waitForm.partySize, addedAt: new Date(),
-      estimatedWaitMinutes: eta, notified: false,
-    }])
-    setShowAddWait(false)
-    setWaitForm({ guestName: "", phone: "", partySize: 2 })
-  }, [waitForm, emptyTables, waitlist.length])
+    setBusy(true)
+    try {
+      await WaitlistApi.add({
+        customerName: waitForm.guestName,
+        customerPhone: waitForm.phone,
+        partySize: waitForm.partySize,
+      })
+      setShowAddWait(false)
+      setWaitForm({ guestName: "", phone: "", partySize: 2 })
+      await loadAll(true)
+    } catch (err) {
+      alert(err instanceof ApiError ? err.message : "Lỗi thêm hàng đợi")
+    } finally { setBusy(false) }
+  }, [waitForm, loadAll])
 
-  const notifyGuest = useCallback((id: string) => {
-    setWaitlist(prev => prev.map(w =>
-      w.id === id ? { ...w, notified: true, notifiedAt: new Date() } : w
-    ))
-  }, [])
+  const notifyGuest = useCallback(async (id: string) => {
+    setBusy(true)
+    try {
+      await WaitlistApi.notify(id)
+      await loadAll(true)
+    } catch (err) {
+      alert(err instanceof ApiError ? err.message : "Lỗi thông báo")
+    } finally { setBusy(false) }
+  }, [loadAll])
 
-  const autoAssignTable = useCallback((waitId: string, partySize: number) => {
-    const tbl = emptyTables.find(t => t.capacity >= partySize)
-    if (!tbl) return
-    setWaitlist(prev => prev.map(w => w.id === waitId ? { ...w, tableId: tbl.id } : w))
-    setTables(prev => prev.map(t => t.id === tbl.id ? { ...t, status: "reserved" as const } : t))
-    notifyGuest(waitId)
-  }, [emptyTables, notifyGuest])
+  const autoAssignTable = useCallback(async (waitId: string, partySize: number) => {
+    setBusy(true)
+    try {
+      // Tìm bàn trống đủ chỗ.
+      const avail = await TablesApi.available(partySize)
+      if (avail.length === 0) {
+        alert("Không có bàn trống đủ chỗ.")
+        return
+      }
+      const tbl = avail[0]
+      // Seat trực tiếp từ waitlist — BE sẽ cập nhật trạng thái bàn + waitlist.
+      await WaitlistApi.seat(waitId, tbl.id)
+      await loadAll(true)
+    } catch (err) {
+      alert(err instanceof ApiError ? err.message : "Lỗi xếp bàn tự động")
+    } finally { setBusy(false) }
+  }, [loadAll])
 
-  const checkInReservation = useCallback((id: string) => {
+  const checkInReservation = useCallback(async (id: string) => {
     const res = reservations.find(r => r.id === id)
-    if (!res?.tableId) return
-    setReservations(prev => prev.map(r => r.id === id ? { ...r, status: "arrived" as const } : r))
-    setTables(prev => prev.map(t =>
-      t.id === res.tableId ? { ...t, status: "occupied" as const, occupiedSince: new Date() } : t
-    ))
-  }, [reservations])
+    if (!res) return
+    if (!res.tableId) {
+      alert("Đặt bàn này chưa được gán bàn cụ thể. Vui lòng confirm trước.")
+      return
+    }
+    setBusy(true)
+    try {
+      await TablesApi.seat({
+        tableId: res.tableId,
+        source: "RESERVATION",
+        sourceId: id,
+      })
+      await loadAll(true)
+    } catch (err) {
+      alert(err instanceof ApiError ? err.message : "Lỗi check-in")
+    } finally { setBusy(false) }
+  }, [reservations, loadAll])
+
+  // Khách rời bàn → BE: OCCUPIED → CLEANING.
+  const markGuestLeft = useCallback(async (tableId: string) => {
+    setBusy(true)
+    try {
+      await TablesApi.updateStatus(tableId, { status: tableStatusToApi("needs-cleaning") })
+      await loadAll(true)
+    } catch (err) {
+      alert(err instanceof ApiError ? err.message : "Lỗi cập nhật bàn")
+    } finally { setBusy(false) }
+  }, [loadAll])
+
+  // Dọn xong → BE: CLEANING → AVAILABLE.
+  const markCleaned = useCallback(async (tableId: string) => {
+    setBusy(true)
+    try {
+      await TablesApi.updateStatus(tableId, { status: tableStatusToApi("empty") })
+      await loadAll(true)
+    } catch (err) {
+      alert(err instanceof ApiError ? err.message : "Lỗi cập nhật bàn")
+    } finally { setBusy(false) }
+  }, [loadAll])
+
+  // Bàn RESERVED nhưng không có reservation gắn → walk-in seat.
+  const seatWalkInOnReserved = useCallback(async (tableId: string) => {
+    setBusy(true)
+    try {
+      await TablesApi.seat({ tableId, source: "WALK_IN" })
+      await loadAll(true)
+    } catch (err) {
+      alert(err instanceof ApiError ? err.message : "Lỗi xếp khách")
+    } finally { setBusy(false) }
+  }, [loadAll])
+
+  if (!ready) return null
+
+  if (loading) {
+    return (
+      <div className="h-screen flex items-center justify-center bg-slate-50 text-slate-500 gap-3">
+        <Loader2 className="w-5 h-5 animate-spin" />
+        <span className="text-sm">Đang tải dữ liệu...</span>
+      </div>
+    )
+  }
+
+  if (loadError && tables.length === 0) {
+    return (
+      <div className="h-screen flex flex-col items-center justify-center bg-slate-50 gap-3 p-6 text-center">
+        <AlertCircle className="w-10 h-10 text-red-500" />
+        <p className="text-sm font-semibold text-slate-700">Không tải được dữ liệu</p>
+        <p className="text-xs text-slate-500 max-w-md">{loadError}</p>
+        <p className="text-xs text-slate-400">Kiểm tra table-service đã chạy chưa.</p>
+        <button onClick={() => loadAll()} className="px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-700 mt-2">
+          Thử lại
+        </button>
+      </div>
+    )
+  }
 
   return (
     <div className="h-screen flex flex-col bg-slate-50 overflow-hidden">
@@ -170,6 +311,21 @@ export default function HostPage() {
           <div className="text-xs text-emerald-500 font-mono border-l border-emerald-700 pl-3">
             {new Date().toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" })}
           </div>
+          <button
+            onClick={() => loadAll(true)}
+            disabled={refreshing || busy}
+            title="Tải lại"
+            className="text-emerald-300 hover:text-white disabled:opacity-30 transition-colors p-1.5"
+          >
+            <RefreshCw className={cn("w-4 h-4", refreshing && "animate-spin")} />
+          </button>
+          <button
+            onClick={logout}
+            title="Đăng xuất"
+            className="text-emerald-300 hover:text-white transition-colors p-1.5"
+          >
+            <LogOut className="w-4 h-4" />
+          </button>
         </div>
       </header>
 
@@ -341,16 +497,18 @@ export default function HostPage() {
                         )}
                         {selectedTable.status === "occupied" && (
                           <button
-                            onClick={() => setTables(prev => prev.map(t => t.id === selectedTable.id ? { ...t, status: "needs-cleaning" as const, occupiedSince: undefined } : t))}
-                            className="w-full py-2.5 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-xl text-sm font-semibold transition-colors"
+                            onClick={() => markGuestLeft(selectedTable.id)}
+                            disabled={busy}
+                            className="w-full py-2.5 bg-slate-200 hover:bg-slate-300 disabled:opacity-50 text-slate-700 rounded-xl text-sm font-semibold transition-colors"
                           >
                             Khách đã rời bàn →
                           </button>
                         )}
                         {selectedTable.status === "needs-cleaning" && (
                           <button
-                            onClick={() => setTables(prev => prev.map(t => t.id === selectedTable.id ? { ...t, status: "empty" as const } : t))}
-                            className="w-full py-2.5 bg-sky-500 hover:bg-sky-600 text-white rounded-xl text-sm font-bold flex items-center justify-center gap-2 transition-colors"
+                            onClick={() => markCleaned(selectedTable.id)}
+                            disabled={busy}
+                            className="w-full py-2.5 bg-sky-500 hover:bg-sky-600 disabled:opacity-50 text-white rounded-xl text-sm font-bold flex items-center justify-center gap-2 transition-colors"
                           >
                             <CheckCircle2 className="w-4 h-4" />Đã dọn xong
                           </button>
@@ -363,15 +521,11 @@ export default function HostPage() {
                                 if (linkedRes) {
                                   checkInReservation(linkedRes.id)
                                 } else {
-                                  // No linked reservation — just seat manually
-                                  setTables(prev => prev.map(t =>
-                                    t.id === selectedTable.id
-                                      ? { ...t, status: "occupied" as const, occupiedSince: new Date() }
-                                      : t
-                                  ))
+                                  seatWalkInOnReserved(selectedTable.id)
                                 }
                               }}
-                              className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-sm font-bold flex items-center justify-center gap-2 transition-colors"
+                              disabled={busy}
+                              className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-xl text-sm font-bold flex items-center justify-center gap-2 transition-colors"
                             >
                               <CheckCircle2 className="w-4 h-4" />
                               {linkedRes ? `Check-in · ${linkedRes.guestName}` : "Xác nhận khách đến"}

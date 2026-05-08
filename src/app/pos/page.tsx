@@ -2,15 +2,24 @@
 
 import { useState, useMemo, useCallback, useEffect } from "react"
 import Link from "next/link"
+import { useRouter } from "next/navigation"
 import {
   UtensilsCrossed, ChevronLeft, ChevronDown, ChevronRight, Plus, Minus, Trash2,
   CreditCard, SplitSquareHorizontal, Tag, Star, AlertCircle,
   CheckCircle2, Clock, X, Printer, Receipt, ChefHat,
-  Bell, Flame,
+  Bell, Flame, Loader2, LogOut, RefreshCw,
 } from "lucide-react"
-import { TABLES, MENU_ITEMS, ORDERS } from "@/lib/mock-data"
 import { formatCurrency, minutesSince, cn } from "@/lib/utils"
 import type { Table, MenuItem, OrderItem, Order, TableStatus } from "@/types"
+import { MenuApi, OrdersApi, TablesApi, KitchenApi, PaymentsApi } from "@/lib/api"
+import {
+  menuItemFromApi, tableFromApi, orderFromApi,
+  orderItemStatusToApi, payMethodToApi, tableStatusToApi,
+} from "@/lib/adapters"
+import { useAuthGuard } from "@/hooks/useAuthGuard"
+import { useRealtime, SSE_URLS } from "@/hooks/useRealtime"
+import { clearToken } from "@/lib/auth"
+import { ApiError } from "@/lib/api/client"
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 const VAT    = 0.08
@@ -35,7 +44,6 @@ const STATUS_CFG: Record<TableStatus, { bg: string; ring: string; text: string; 
   occupied:        { bg: "bg-sky-50",      ring: "border-sky-200 hover:border-sky-400",         text: "text-sky-700",    dot: "bg-sky-500",    label: "Có khách" },
   reserved:        { bg: "bg-amber-50",    ring: "border-amber-200 hover:border-amber-400",     text: "text-amber-700",  dot: "bg-amber-500",  label: "Đặt trước"},
   "needs-cleaning":{ bg: "bg-red-50",      ring: "border-red-200 hover:border-red-400",         text: "text-red-600",    dot: "bg-red-500",    label: "Cần dọn"  },
-  waiting:         { bg: "bg-violet-50",   ring: "border-violet-200 hover:border-violet-400",   text: "text-violet-700", dot: "bg-violet-500", label: "Chờ dọn"  },
 }
 
 const ITEM_STATUS_CFG: Record<string, { label: string; cls: string }> = {
@@ -48,13 +56,78 @@ const ITEM_STATUS_CFG: Record<string, { label: string; cls: string }> = {
 
 // ─── Main Component ─────────────────────────────────────────────────────────
 export default function POSPage() {
-  const [tables, setTables]       = useState(TABLES)
-  const [orders, setOrders]       = useState<Order[]>(ORDERS)
+  const router = useRouter()
+  const ready  = useAuthGuard()
+
+  const [tables, setTables]       = useState<Table[]>([])
+  const [menu, setMenu]           = useState<MenuItem[]>([])
+  const [orders, setOrders]       = useState<Order[]>([])
+  const [loading, setLoading]     = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [busy, setBusy]           = useState(false)   // chặn double-click khi đang gọi API
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set())
   const [draftItems, setDraftItems] = useState<OrderItem[]>([])
   const [menuCat, setMenuCat]     = useState("Tất cả")
   const [menuSearch, setMenuSearch] = useState("")
+
+  // ── Load data from API ──
+  const loadAll = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true)
+    else setRefreshing(true)
+    setLoadError(null)
+    try {
+      const [tablesApi, menuApi] = await Promise.all([
+        TablesApi.list(),
+        MenuApi.listItems(),
+      ])
+      const uiTables = tablesApi.map(tableFromApi)
+      const uiMenu   = menuApi.map(menuItemFromApi)
+      setTables(uiTables)
+      setMenu(uiMenu)
+
+      // Lấy order mở (đang phục vụ) cho từng bàn — gộp theo trạng thái khác COMPLETED/CANCELLED.
+      const menuMap = new Map(uiMenu.map((m) => [m.id, m]))
+      const tableNumberById = new Map(uiTables.map((t) => [t.id, t.number]))
+      const ordersPage = await OrdersApi.list({ size: 200 })
+      const activeStatuses = new Set(["DRAFT", "PENDING", "COOKING", "READY_TO_SERVE", "SERVED"])
+      const uiOrders = (ordersPage.content ?? [])
+        .filter((o) => activeStatuses.has(o.status))
+        .map((o) => orderFromApi(o, { menuMap, tableNumberById }))
+      setOrders(uiOrders)
+    } catch (err) {
+      if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+        clearToken()
+        router.replace("/login?redirect=/pos")
+        return
+      }
+      const msg =
+        err instanceof ApiError ? err.message : "Không kết nối được tới máy chủ."
+      setLoadError(msg)
+    } finally {
+      setLoading(false)
+      setRefreshing(false)
+    }
+  }, [router])
+
+  useEffect(() => {
+    if (ready) loadAll()
+  }, [ready, loadAll])
+
+  // Realtime: 3 SSE streams. POS quan tâm cả 3 vì hiển thị bàn + món + trạng thái bếp.
+  useRealtime(
+    ready ? [SSE_URLS.ORDERS, SSE_URLS.KITCHEN, SSE_URLS.TABLES] : [],
+    () => loadAll(true),
+  )
+
+  const menuMap = useMemo(() => new Map(menu.map((m) => [m.id, m])), [menu])
+  const tableNumberById = useMemo(() => new Map(tables.map((t) => [t.id, t.number])), [tables])
+
+  const logout = useCallback(() => {
+    clearToken()
+    router.replace("/login")
+  }, [router])
 
   // Payment state
   const [showPay, setShowPay]     = useState(false)
@@ -95,16 +168,16 @@ export default function POSPage() {
   const allItems   = useMemo(() => [...sentItems, ...draftItems], [sentItems, draftItems])
 
   const categories = useMemo(
-    () => ["Tất cả", ...Array.from(new Set(MENU_ITEMS.map(m => m.category)))],
-    []
+    () => ["Tất cả", ...Array.from(new Set(menu.map(m => m.category)))],
+    [menu]
   )
   const filteredMenu = useMemo(
-    () => MENU_ITEMS.filter(m => {
+    () => menu.filter(m => {
       const catOk = menuCat === "Tất cả" || m.category === menuCat
       const searchOk = menuSearch === "" || m.name.toLowerCase().includes(menuSearch.toLowerCase())
       return catOk && searchOk
     }),
-    [menuCat, menuSearch]
+    [menu, menuCat, menuSearch]
   )
 
   const discountAmt = useMemo(() => {
@@ -159,51 +232,104 @@ export default function POSPage() {
     setDraftItems(prev => prev.filter(i => i.id !== id))
   }, [])
 
-  const markServed = useCallback((orderId: string, itemId: string) => {
-    setOrders(prev => prev.map(o =>
-      o.id === orderId
-        ? { ...o, items: o.items.map(i => i.id === itemId ? { ...i, status: "served" as const } : i) }
-        : o
-    ))
-    showToast("Đã đánh dấu phục vụ ✓")
-  }, [showToast])
+  const markServed = useCallback(async (orderId: string, itemId: string) => {
+    setBusy(true)
+    try {
+      await OrdersApi.updateItemStatus(orderId, itemId, orderItemStatusToApi("served"))
+      showToast("Đã đánh dấu phục vụ ✓")
+      await loadAll(true)
+    } catch (err) {
+      showToast(err instanceof ApiError ? err.message : "Lỗi cập nhật", "info")
+    } finally {
+      setBusy(false)
+    }
+  }, [loadAll, showToast])
 
-  const cancelSentItem = useCallback((orderId: string, itemId: string) => {
+  const cancelSentItem = useCallback(async (orderId: string, itemId: string) => {
     if (!confirm("Hủy món này? Bếp sẽ không nấu nữa.")) return
-    setOrders(prev => prev.map(o =>
-      o.id === orderId
-        ? { ...o, items: o.items.map(i => i.id === itemId ? { ...i, status: "cancelled" as const } : i) }
-        : o
-    ))
-    showToast("Đã hủy món ✕", "info")
-  }, [showToast])
+    setBusy(true)
+    try {
+      await OrdersApi.updateItemStatus(orderId, itemId, orderItemStatusToApi("cancelled"))
+      showToast("Đã hủy món ✕", "info")
+      await loadAll(true)
+    } catch (err) {
+      showToast(err instanceof ApiError ? err.message : "Lỗi hủy món", "info")
+    } finally {
+      setBusy(false)
+    }
+  }, [loadAll, showToast])
 
   // ── Send to kitchen ──
-  const sendToKitchen = useCallback(() => {
-    if (draftItems.length === 0) return
-    setOrders(prev => {
-      const existing = prev.find(o => o.tableId === selectedId && o.status !== "paid")
+  // Tạo order ở BE (nếu chưa có) → tạo kitchen ticket → set table OCCUPIED.
+  const sendToKitchen = useCallback(async () => {
+    if (draftItems.length === 0 || !selectedId) return
+    const table = tables.find(t => t.id === selectedId)
+    if (!table) return
+
+    setBusy(true)
+    try {
+      const existing = orders.find(o => o.tableId === selectedId && o.status !== "paid")
+
+      let orderId: string
       if (existing) {
-        return prev.map(o => o.id === existing.id
-          ? { ...o, items: [...o.items, ...draftItems.map(i=>({...i,status:"pending" as const}))], status: "sent" as const, sentAt: new Date() }
-          : o
-        )
+        // Thêm items vào order hiện có (gửi tuần tự — BE chưa hỗ trợ batch).
+        for (const it of draftItems) {
+          await OrdersApi.addItem(existing.id, {
+            menuItemId: it.menuItemId,
+            quantity: it.quantity,
+            note: [it.allergyNotes && `[DỊ ỨNG] ${it.allergyNotes}`, it.notes].filter(Boolean).join(" · ") || undefined,
+          })
+        }
+        orderId = existing.id
+      } else {
+        // Tạo order mới.
+        const created = await OrdersApi.create({
+          tableId: selectedId,
+          type: "DINE_IN",
+          items: draftItems.map(it => ({
+            menuItemId: it.menuItemId,
+            quantity: it.quantity,
+            note: [it.allergyNotes && `[DỊ ỨNG] ${it.allergyNotes}`, it.notes].filter(Boolean).join(" · ") || undefined,
+          })),
+        })
+        orderId = created.id
+        // Cập nhật trạng thái bàn → OCCUPIED kèm currentOrderId.
+        try {
+          await TablesApi.updateStatus(selectedId, {
+            status: tableStatusToApi("occupied"),
+            currentOrderId: orderId,
+          })
+        } catch {/* non-fatal */}
       }
-      const table = tables.find(t => t.id === selectedId)!
-      return [...prev, {
-        id: `o-${Date.now()}`, tableId: selectedId!, tableNumber: table.number,
-        items: draftItems, status: "sent" as const, createdAt: new Date(), sentAt: new Date(),
-        isVIP: table.isVIP ?? false, serverName: "Nhân viên",
-        discountAmount: 0, tipAmount: 0,
-      }]
-    })
-    setTables(prev => prev.map(t =>
-      t.id === selectedId ? { ...t, status: "occupied" as const, occupiedSince: t.occupiedSince ?? new Date() } : t
-    ))
-    const count = draftItems.reduce((s, i) => s + i.quantity, 0)
-    setDraftItems([])
-    showToast(`Đã gửi ${count} món xuống bếp 🍳`, "info")
-  }, [draftItems, selectedId, tables, showToast])
+
+      // Tạo kitchen ticket để KDS thấy.
+      try {
+        await KitchenApi.createTicket({
+          orderId,
+          tableId: selectedId,
+          items: draftItems.map(it => ({
+            menuItemId: it.menuItemId,
+            menuItemName: it.menuItem.name,
+            quantity: it.quantity,
+            notes: [it.allergyNotes && `[DỊ ỨNG] ${it.allergyNotes}`, it.notes].filter(Boolean).join(" · ") || undefined,
+          })),
+        })
+      } catch (err) {
+        // Không chặn flow nếu kitchen-service down — order vẫn lưu được.
+        console.warn("Tạo kitchen ticket thất bại:", err)
+      }
+
+      const count = draftItems.reduce((s, i) => s + i.quantity, 0)
+      setDraftItems([])
+      showToast(`Đã gửi ${count} món xuống bếp 🍳`, "info")
+      await loadAll(true)
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : "Lỗi gửi bếp"
+      showToast(msg, "info")
+    } finally {
+      setBusy(false)
+    }
+  }, [draftItems, selectedId, tables, orders, loadAll, showToast])
 
   // ── Apply voucher ──
   const applyVoucher = useCallback(() => {
@@ -217,26 +343,86 @@ export default function POSPage() {
   }, [voucherInput, showToast])
 
   // ── Payment ──
-  const processPayment = useCallback(() => {
-    setOrders(prev => prev.map(o =>
-      o.tableId === selectedId && o.status !== "paid"
-        ? { ...o, status: "paid" as const, discountAmount: discountAmt, tipAmount: tip, paymentMethod: payMethod }
-        : o
-    ))
-    setTables(prev => prev.map(t =>
-      t.id === selectedId ? { ...t, status: "needs-cleaning" as const, currentOrderId: undefined, occupiedSince: undefined } : t
-    ))
-    setShowPay(false)
-    const ratingMsg = rating > 0 ? ` · ${rating}★` : ""
-    showToast(`Thanh toán thành công ${formatCurrency(bill.total + tip)}${ratingMsg} 🎉`)
-    setTimeout(() => { setSelectedId(null); setDraftItems([]); setRating(0); setHoverRating(0); setFeedback("") }, 1500)
-  }, [selectedId, discountAmt, tip, payMethod, bill.total, rating, showToast])
+  const processPayment = useCallback(async () => {
+    if (!selectedId || !currentOrder) return
+    setBusy(true)
+    try {
+      // 1. Tạo payment record.
+      const payment = await PaymentsApi.create({
+        orderId: currentOrder.id,
+        method: payMethodToApi(payMethod),
+        amount: bill.total + tip,
+      })
+      // 2. Process payment (BE đánh dấu COMPLETED + sinh transactionId).
+      try {
+        await PaymentsApi.process(payment.id)
+      } catch (err) {
+        console.warn("Process payment thất bại:", err)
+      }
+      // 3. Đóng order.
+      try {
+        await OrdersApi.updateStatus(currentOrder.id, "COMPLETED")
+      } catch (err) {
+        console.warn("Close order thất bại:", err)
+      }
+      // 4. Set bàn → CLEANING.
+      try {
+        await TablesApi.updateStatus(selectedId, {
+          status: tableStatusToApi("needs-cleaning"),
+        })
+      } catch (err) {
+        console.warn("Cập nhật bàn thất bại:", err)
+      }
+
+      setShowPay(false)
+      const ratingMsg = rating > 0 ? ` · ${rating}★` : ""
+      showToast(`Thanh toán thành công ${formatCurrency(bill.total + tip)}${ratingMsg} 🎉`)
+      setTimeout(() => {
+        setSelectedId(null); setDraftItems([])
+        setRating(0); setHoverRating(0); setFeedback("")
+      }, 1500)
+      await loadAll(true)
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : "Lỗi thanh toán"
+      showToast(msg, "info")
+    } finally {
+      setBusy(false)
+    }
+  }, [selectedId, currentOrder, payMethod, bill.total, tip, rating, loadAll, showToast])
 
   // Stats for header
   const occupiedCount  = tables.filter(t => t.status === "occupied").length
   const emptyCount     = tables.filter(t => t.status === "empty").length
   const newItemCount   = draftItems.reduce((s, i) => s + i.quantity, 0)
   const readyItems     = sentItems.filter(i => i.status === "ready")
+
+  // ── Auth chưa sẵn sàng → render trắng (useAuthGuard sẽ redirect) ──
+  if (!ready) return null
+
+  // ── Loading lần đầu ──
+  if (loading) {
+    return (
+      <div className="h-screen flex items-center justify-center bg-slate-50 text-slate-500 gap-3">
+        <Loader2 className="w-5 h-5 animate-spin" />
+        <span className="text-sm">Đang tải dữ liệu từ máy chủ...</span>
+      </div>
+    )
+  }
+
+  // ── Lỗi tải lần đầu ──
+  if (loadError && tables.length === 0) {
+    return (
+      <div className="h-screen flex flex-col items-center justify-center bg-slate-50 gap-3 p-6 text-center">
+        <AlertCircle className="w-10 h-10 text-red-500" />
+        <p className="text-sm font-semibold text-slate-700">Không tải được dữ liệu</p>
+        <p className="text-xs text-slate-500 max-w-md">{loadError}</p>
+        <p className="text-xs text-slate-400">Kiểm tra các service BE đã chạy chưa (table-service, menu-service, order-service).</p>
+        <button onClick={() => loadAll()} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 mt-2">
+          Thử lại
+        </button>
+      </div>
+    )
+  }
 
   return (
     <div className="h-screen flex flex-col bg-slate-100 overflow-hidden font-sans">
@@ -271,6 +457,21 @@ export default function POSPage() {
           <div className="text-slate-500 text-xs border-l border-slate-700 pl-4 font-mono">
             {clockStr}
           </div>
+          <button
+            onClick={() => loadAll(true)}
+            disabled={refreshing || busy}
+            title="Tải lại"
+            className="text-slate-400 hover:text-white disabled:opacity-40 transition-colors p-1.5"
+          >
+            <RefreshCw className={cn("w-4 h-4", refreshing && "animate-spin")} />
+          </button>
+          <button
+            onClick={logout}
+            title="Đăng xuất"
+            className="text-slate-400 hover:text-white transition-colors p-1.5"
+          >
+            <LogOut className="w-4 h-4" />
+          </button>
         </div>
       </header>
 

@@ -1,69 +1,11 @@
 import type {
-  Table, MenuItem, Order, OrderItem, Reservation,
+  MenuItem, Order, OrderItem, Reservation,
   WaitlistEntry, IngredientItem, StaffMember, AuditLog,
   RevenueHour, TopDish,
 } from "@/types"
 
 const now = new Date()
 const ago = (min: number) => new Date(now.getTime() - min * 60000)
-
-// ─── TABLES ────────────────────────────────────────────────────────────────
-export const TABLES: Table[] = [
-  // Khu A · Tầng 1 — 15 bàn
-  { id: "t1",  number: 1,  capacity: 2,  status: "empty",          section: "A", floor: 1 },
-  { id: "t2",  number: 2,  capacity: 4,  status: "occupied",       currentOrderId: "o1", occupiedSince: ago(45), section: "A", floor: 1 },
-  { id: "t3",  number: 3,  capacity: 4,  status: "reserved",       reservationId: "r1", section: "A", floor: 1 },
-  { id: "t4",  number: 4,  capacity: 6,  status: "occupied",       currentOrderId: "o2", occupiedSince: ago(20), section: "A", floor: 1, isVIP: true },
-  { id: "t5",  number: 5,  capacity: 2,  status: "needs-cleaning", section: "A", floor: 1 },
-  { id: "t16", number: 16, capacity: 4,  status: "empty",          section: "A", floor: 1 },
-  { id: "t17", number: 17, capacity: 2,  status: "empty",          section: "A", floor: 1 },
-  { id: "t18", number: 18, capacity: 4,  status: "occupied",       occupiedSince: ago(35), section: "A", floor: 1 },
-  { id: "t19", number: 19, capacity: 6,  status: "empty",          section: "A", floor: 1 },
-  { id: "t20", number: 20, capacity: 2,  status: "needs-cleaning", section: "A", floor: 1 },
-  { id: "t21", number: 21, capacity: 4,  status: "reserved",       section: "A", floor: 1 },
-  { id: "t22", number: 22, capacity: 8,  status: "empty",          section: "A", floor: 1 },
-  { id: "t23", number: 23, capacity: 4,  status: "occupied",       occupiedSince: ago(125), section: "A", floor: 1 },
-  { id: "t24", number: 24, capacity: 2,  status: "waiting",        section: "A", floor: 1 },
-  { id: "t25", number: 25, capacity: 4,  status: "empty",          section: "A", floor: 1 },
-
-  // Khu B · Tầng 1 — 16 bàn
-  { id: "t6",  number: 6,  capacity: 8,  status: "empty",          section: "B", floor: 1 },
-  { id: "t7",  number: 7,  capacity: 4,  status: "occupied",       currentOrderId: "o3", occupiedSince: ago(10), section: "B", floor: 1 },
-  { id: "t8",  number: 8,  capacity: 4,  status: "waiting",        section: "B", floor: 1 },
-  { id: "t9",  number: 9,  capacity: 2,  status: "empty",          section: "B", floor: 1 },
-  { id: "t10", number: 10, capacity: 6,  status: "occupied",       currentOrderId: "o4", occupiedSince: ago(60), section: "B", floor: 1 },
-  { id: "t26", number: 26, capacity: 4,  status: "empty",          section: "B", floor: 1 },
-  { id: "t27", number: 27, capacity: 2,  status: "occupied",       occupiedSince: ago(25), section: "B", floor: 1 },
-  { id: "t28", number: 28, capacity: 4,  status: "empty",          section: "B", floor: 1 },
-  { id: "t29", number: 29, capacity: 6,  status: "needs-cleaning", section: "B", floor: 1 },
-  { id: "t30", number: 30, capacity: 4,  status: "empty",          section: "B", floor: 1 },
-  { id: "t31", number: 31, capacity: 2,  status: "reserved",       section: "B", floor: 1 },
-  { id: "t32", number: 32, capacity: 4,  status: "occupied",       occupiedSince: ago(95), section: "B", floor: 1 },
-  { id: "t33", number: 33, capacity: 8,  status: "empty",          section: "B", floor: 1, isVIP: true },
-  { id: "t34", number: 34, capacity: 4,  status: "empty",          section: "B", floor: 1 },
-  { id: "t35", number: 35, capacity: 2,  status: "waiting",        section: "B", floor: 1 },
-  { id: "t36", number: 36, capacity: 6,  status: "empty",          section: "B", floor: 1 },
-
-  // Khu C · Tầng 2 — 18 bàn
-  { id: "t11", number: 11, capacity: 4,  status: "empty",          section: "C", floor: 2 },
-  { id: "t12", number: 12, capacity: 4,  status: "reserved",       reservationId: "r2", section: "C", floor: 2 },
-  { id: "t13", number: 13, capacity: 2,  status: "empty",          section: "C", floor: 2 },
-  { id: "t14", number: 14, capacity: 10, status: "occupied",       currentOrderId: "o5", occupiedSince: ago(30), section: "C", floor: 2, isVIP: true },
-  { id: "t15", number: 15, capacity: 2,  status: "empty",          section: "C", floor: 2 },
-  { id: "t37", number: 37, capacity: 4,  status: "empty",          section: "C", floor: 2 },
-  { id: "t38", number: 38, capacity: 6,  status: "occupied",       occupiedSince: ago(40), section: "C", floor: 2 },
-  { id: "t39", number: 39, capacity: 4,  status: "empty",          section: "C", floor: 2 },
-  { id: "t40", number: 40, capacity: 2,  status: "needs-cleaning", section: "C", floor: 2 },
-  { id: "t41", number: 41, capacity: 8,  status: "empty",          section: "C", floor: 2 },
-  { id: "t42", number: 42, capacity: 4,  status: "occupied",       occupiedSince: ago(15), section: "C", floor: 2 },
-  { id: "t43", number: 43, capacity: 6,  status: "empty",          section: "C", floor: 2 },
-  { id: "t44", number: 44, capacity: 4,  status: "reserved",       section: "C", floor: 2 },
-  { id: "t45", number: 45, capacity: 2,  status: "empty",          section: "C", floor: 2 },
-  { id: "t46", number: 46, capacity: 10, status: "empty",          section: "C", floor: 2, isVIP: true },
-  { id: "t47", number: 47, capacity: 4,  status: "waiting",        section: "C", floor: 2 },
-  { id: "t48", number: 48, capacity: 2,  status: "empty",          section: "C", floor: 2 },
-  { id: "t49", number: 49, capacity: 6,  status: "occupied",       occupiedSince: ago(55), section: "C", floor: 2 },
-]
 
 // ─── MENU ITEMS ─────────────────────────────────────────────────────────────
 export const MENU_ITEMS: MenuItem[] = [

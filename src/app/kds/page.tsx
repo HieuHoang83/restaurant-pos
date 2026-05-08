@@ -1,15 +1,21 @@
 "use client"
 
-import { useState, useEffect, useCallback, useRef } from "react"
+import { useState, useEffect, useCallback, useRef, useMemo } from "react"
 import Link from "next/link"
+import { useRouter } from "next/navigation"
 import {
   ChevronLeft, Monitor, AlertCircle, Clock, RotateCcw,
   PauseCircle, CheckCircle2, ChefHat, Flame, Star,
-  Zap, Timer, Coffee,
+  Zap, Timer, Coffee, Loader2, LogOut, RefreshCw,
 } from "lucide-react"
-import { ORDERS } from "@/lib/mock-data"
 import { formatElapsed, cn } from "@/lib/utils"
-import type { Station, OrderItem, Order } from "@/types"
+import type { Station, OrderItem, Order, MenuItem } from "@/types"
+import { KitchenApi, MenuApi, TablesApi } from "@/lib/api"
+import { menuItemFromApi, ticketFromApi, ticketItemStatusToApi } from "@/lib/adapters"
+import { useAuthGuard } from "@/hooks/useAuthGuard"
+import { useRealtime, SSE_URLS } from "@/hooks/useRealtime"
+import { clearToken } from "@/lib/auth"
+import { ApiError } from "@/lib/api/client"
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 const STATIONS: Station[] = ["Nướng", "Chiên", "Tráng miệng", "Bar", "Lạnh"]
@@ -36,7 +42,8 @@ const STATION_CFG: Record<Station, {
 // ─── Ticket interface ────────────────────────────────────────────────────────
 interface Ticket {
   orderId: string
-  tableNumber: number
+  tableLabel: string  // VD: "A01", "B05", "C02" — số nguyên + section prefix
+  tableSection: string // VD: "A", "B", "C" — chữ cái đầu cho UI badge
   isVIP: boolean
   item: OrderItem
   station: Station
@@ -44,20 +51,23 @@ interface Ticket {
   slaSeconds: number
 }
 
-function buildTickets(orders: Order[]): Ticket[] {
+function buildTickets(orders: Order[], tableLabelById: Map<string, string>): Ticket[] {
   const tickets: Ticket[] = []
   for (const order of orders) {
     if (!order.sentAt) continue
+    const label = tableLabelById.get(order.tableId) ?? `#${order.tableNumber || "?"}`
+    const section = label.match(/^[A-Za-z]+/)?.[0] ?? ""
     for (const item of order.items) {
       if (item.status === "served" || item.status === "cancelled") continue
       tickets.push({
-        orderId:     order.id,
-        tableNumber: order.tableNumber,
-        isVIP:       order.isVIP,
+        orderId:      order.id,
+        tableLabel:   label,
+        tableSection: section,
+        isVIP:        order.isVIP,
         item,
-        station:     item.menuItem.station,
-        sentAt:      order.sentAt!,
-        slaSeconds:  item.menuItem.slaMinutes * 60,
+        station:      item.menuItem.station,
+        sentAt:       order.sentAt!,
+        slaSeconds:   item.menuItem.slaMinutes * 60,
       })
     }
   }
@@ -74,8 +84,17 @@ type SuspendInfo = { itemId: string; orderId: string }
 
 // ─── Main component ──────────────────────────────────────────────────────────
 export default function KDSPage() {
+  const router = useRouter()
+  const ready  = useAuthGuard()
+
   const [activeStation, setActiveStation] = useState<Station | "Tất cả">("Tất cả")
-  const [orders, setOrders] = useState(ORDERS)
+  const [orders, setOrders] = useState<Order[]>([])
+  const [menu, setMenu]     = useState<MenuItem[]>([])
+  const [tableLabelById, setTableLabelById] = useState<Map<string, string>>(new Map())
+  const [loading, setLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
   const [second, setSecond] = useState(0)
   const [suspendTarget, setSuspendTarget] = useState<SuspendInfo | null>(null)
   const [suspendReason, setSuspendReason] = useState("")
@@ -88,7 +107,59 @@ export default function KDSPage() {
     return () => clearInterval(clockRef.current)
   }, [])
 
-  const tickets = buildTickets(orders)
+  // ── Load tickets from BE ──
+  const loadAll = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true)
+    else setRefreshing(true)
+    setLoadError(null)
+    try {
+      // Lấy menu + tables để map id → name/number cho UI.
+      const [menuApi, tablesApi, ticketsApi] = await Promise.all([
+        MenuApi.listItems().catch(() => []),
+        TablesApi.list().catch(() => []),
+        KitchenApi.activeTickets(),
+      ])
+      const uiMenu = menuApi.map(menuItemFromApi)
+      const menuMap = new Map(uiMenu.map((m) => [m.id, m]))
+      const tableNumberById = new Map<string, number>()
+      const tableLabelMap = new Map<string, string>()
+      for (const t of tablesApi) {
+        const n = parseInt(t.tableNumber.replace(/\D+/g, ""), 10) || 0
+        tableNumberById.set(t.id, n)
+        tableLabelMap.set(t.id, t.tableNumber)
+      }
+      setMenu(uiMenu)
+      setTableLabelById(tableLabelMap)
+      const uiOrders = ticketsApi.map((tk) =>
+        ticketFromApi(tk, { menuMap, tableNumberById }),
+      )
+      setOrders(uiOrders)
+    } catch (err) {
+      if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+        clearToken()
+        router.replace("/login?redirect=/kds")
+        return
+      }
+      setLoadError(err instanceof ApiError ? err.message : "Không kết nối được tới máy chủ.")
+    } finally {
+      setLoading(false)
+      setRefreshing(false)
+    }
+  }, [router])
+
+  useEffect(() => {
+    if (ready) loadAll()
+  }, [ready, loadAll])
+
+  // Realtime: SSE từ kitchen-service (ticket events) — refetch ngay khi có thay đổi.
+  useRealtime(ready ? [SSE_URLS.KITCHEN] : [], () => loadAll(true))
+
+  const logout = useCallback(() => {
+    clearToken()
+    router.replace("/login")
+  }, [router])
+
+  const tickets = buildTickets(orders, tableLabelById)
   const stationTickets = activeStation === "Tất cả"
     ? tickets
     : tickets.filter(t => t.station === activeStation)
@@ -106,53 +177,98 @@ export default function KDSPage() {
     return e > t.slaSeconds && t.item.status !== "ready"
   }).length
 
-  // ── Actions ──
-  const startCooking = useCallback((ticket: Ticket) => {
-    setOrders(prev => prev.map(o => {
-      if (o.id !== ticket.orderId) return o
-      return { ...o, items: o.items.map(i =>
-        i.id === ticket.item.id ? { ...i, status: "cooking" as const, startedAt: new Date() } : i
-      )}
-    }))
+  // ── Actions ── (gọi BE qua KitchenApi.updateItemStatus)
+  // Optimistic update + reload background.
+  const updateItemUi = useCallback((ticketItemId: string, newStatus: OrderItem["status"]) => {
+    setOrders(prev => prev.map(o => ({
+      ...o,
+      items: o.items.map(i =>
+        i.id === ticketItemId
+          ? { ...i,
+              status: newStatus,
+              startedAt: newStatus === "cooking" && !i.startedAt ? new Date() : i.startedAt,
+              completedAt: newStatus === "ready" ? new Date() : i.completedAt,
+            }
+          : i,
+      ),
+    })))
   }, [])
 
-  const markReady = useCallback((ticket: Ticket) => {
-    setOrders(prev => prev.map(o => {
-      if (o.id !== ticket.orderId) return o
-      return { ...o, items: o.items.map(i =>
-        i.id === ticket.item.id ? { ...i, status: "ready" as const, completedAt: new Date() } : i
-      )}
-    }))
-  }, [])
+  const startCooking = useCallback(async (ticket: Ticket) => {
+    setBusy(true)
+    updateItemUi(ticket.item.id, "cooking")
+    try {
+      await KitchenApi.updateItemStatus(ticket.item.id, ticketItemStatusToApi("cooking"))
+    } catch (err) {
+      console.error(err); await loadAll(true)
+    } finally { setBusy(false) }
+  }, [updateItemUi, loadAll])
 
-  const recallTicket = useCallback((ticket: Ticket) => {
-    setOrders(prev => prev.map(o => {
-      if (o.id !== ticket.orderId) return o
-      return { ...o, items: o.items.map(i =>
-        i.id === ticket.item.id ? { ...i, status: "cooking" as const, completedAt: undefined } : i
-      )}
-    }))
+  const markReady = useCallback(async (ticket: Ticket) => {
+    setBusy(true)
+    updateItemUi(ticket.item.id, "ready")
+    try {
+      await KitchenApi.updateItemStatus(ticket.item.id, ticketItemStatusToApi("ready"))
+    } catch (err) {
+      console.error(err); await loadAll(true)
+    } finally { setBusy(false) }
+  }, [updateItemUi, loadAll])
+
+  const recallTicket = useCallback(async (ticket: Ticket) => {
+    setBusy(true)
+    updateItemUi(ticket.item.id, "cooking")
     setRecalled(prev => {
       const next = new Set(prev)
       next.add(ticket.item.id)
       setTimeout(() => setRecalled(s => { const n=new Set(s); n.delete(ticket.item.id); return n }), 3000)
       return next
     })
-  }, [])
+    try {
+      await KitchenApi.updateItemStatus(ticket.item.id, ticketItemStatusToApi("cooking"))
+    } catch (err) {
+      console.error(err); await loadAll(true)
+    } finally { setBusy(false) }
+  }, [updateItemUi, loadAll])
 
-  const confirmSuspend = useCallback(() => {
+  const confirmSuspend = useCallback(async () => {
     if (!suspendTarget || !suspendReason) return
-    setOrders(prev => prev.map(o => {
-      if (o.id !== suspendTarget.orderId) return o
-      return { ...o, items: o.items.map(i =>
-        i.id === suspendTarget.itemId ? { ...i, status: "cancelled" as const } : i
-      )}
-    }))
+    setBusy(true)
+    updateItemUi(suspendTarget.itemId, "cancelled")
     setSuspendTarget(null)
     setSuspendReason("")
-  }, [suspendTarget, suspendReason])
+    try {
+      await KitchenApi.updateItemStatus(suspendTarget.itemId, ticketItemStatusToApi("cancelled"))
+    } catch (err) {
+      console.error(err); await loadAll(true)
+    } finally { setBusy(false) }
+  }, [suspendTarget, suspendReason, updateItemUi, loadAll])
 
   const now = Date.now()
+
+  if (!ready) return null
+
+  if (loading) {
+    return (
+      <div className="h-screen flex items-center justify-center bg-[#0d0f14] text-gray-400 gap-3">
+        <Loader2 className="w-5 h-5 animate-spin" />
+        <span className="text-sm">Đang tải tickets từ kitchen-service...</span>
+      </div>
+    )
+  }
+
+  if (loadError && orders.length === 0) {
+    return (
+      <div className="h-screen flex flex-col items-center justify-center bg-[#0d0f14] text-gray-300 gap-3 p-6 text-center">
+        <AlertCircle className="w-10 h-10 text-red-400" />
+        <p className="text-sm font-semibold">Không tải được tickets</p>
+        <p className="text-xs text-gray-500 max-w-md">{loadError}</p>
+        <p className="text-xs text-gray-600">Kiểm tra kitchen-service đã chạy chưa.</p>
+        <button onClick={() => loadAll()} className="px-4 py-2 bg-orange-500 text-white rounded-lg text-sm font-medium hover:bg-orange-600 mt-2">
+          Thử lại
+        </button>
+      </div>
+    )
+  }
 
   return (
     <div className="min-h-screen bg-[#0d0f14] text-white flex flex-col select-none">
@@ -180,6 +296,21 @@ export default function KDSPage() {
           <div className="text-gray-600 text-xs font-mono ml-2 border-l border-white/10 pl-3">
             {new Date().toLocaleTimeString("vi-VN")}
           </div>
+          <button
+            onClick={() => loadAll(true)}
+            disabled={refreshing || busy}
+            title="Tải lại"
+            className="text-gray-500 hover:text-white disabled:opacity-30 transition-colors p-1.5"
+          >
+            <RefreshCw className={cn("w-4 h-4", refreshing && "animate-spin")} />
+          </button>
+          <button
+            onClick={logout}
+            title="Đăng xuất"
+            className="text-gray-500 hover:text-white transition-colors p-1.5"
+          >
+            <LogOut className="w-4 h-4" />
+          </button>
         </div>
       </header>
 
@@ -420,7 +551,12 @@ function TicketCard({ ticket: t, second: _second, isRecalled, onStart, onReady, 
       <div className={cn("px-3 pt-3 pb-2", isDone && "opacity-60")}>
         <div className="flex items-center justify-between mb-2">
           <div className="flex items-center gap-1.5">
-            <span className="font-black text-white text-lg leading-none">B{t.tableNumber}</span>
+            <span className="font-black text-white text-lg leading-none">Bàn {t.tableLabel}</span>
+            {t.tableSection && (
+              <span className="text-[9px] bg-slate-700/60 border border-slate-600 text-slate-300 px-1.5 py-0.5 rounded-md font-bold uppercase tracking-wider">
+                Khu {t.tableSection}
+              </span>
+            )}
             {t.isVIP && (
               <span className="inline-flex items-center gap-0.5 bg-amber-500/20 border border-amber-500/40 text-amber-400 text-[9px] font-black px-1.5 py-0.5 rounded-md">
                 <Star className="w-2.5 h-2.5 fill-amber-400" />VIP
