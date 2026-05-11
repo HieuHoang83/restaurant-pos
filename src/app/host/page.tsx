@@ -732,7 +732,7 @@ export default function HostPage() {
                   <div className="mb-3 p-2.5 bg-amber-50 border border-amber-200 rounded-xl flex items-start gap-2">
                     <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
                     <p className="text-[11px] text-amber-700 leading-tight">
-                      <b>Hệ thống trễ:</b> Có bàn ngồi quá giờ (60p+). ETA đã được tự động điều chỉnh tăng.
+                      <b>Hệ thống trễ:</b> Có bàn ngồi quá giờ (90p+). ETA đã được tự động điều chỉnh tăng.
                     </p>
                   </div>
                 )}
