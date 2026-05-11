@@ -7,7 +7,7 @@ import {
   UtensilsCrossed, ChevronLeft, ChevronDown, ChevronRight, Plus, Minus, Trash2,
   CreditCard, SplitSquareHorizontal, Tag, Star, AlertCircle,
   CheckCircle2, Clock, X, Printer, Receipt, ChefHat,
-  Bell, Flame, Loader2, LogOut, RefreshCw,
+  Bell, Flame, Loader2, LogOut, RefreshCw, Undo2,
 } from "lucide-react"
 import { formatCurrency, minutesSince, cn } from "@/lib/utils"
 import type { Table, MenuItem, OrderItem, Order, TableStatus } from "@/types"
@@ -145,24 +145,185 @@ export default function POSPage() {
   const [noteText, setNoteText]   = useState("")
   const [allergyText, setAllergyText] = useState("")
 
+  // Grace Period states
+  const [sendGrace, setSendGrace] = useState<{ items: OrderItem[], tableId: string, timeLeft: number } | null>(null)
+  const [servedGrace, setServedGrace] = useState<Record<string, { orderId: string, timeLeft: number }>>({})
+
   // Toast
   const [toast, setToast]         = useState<{ msg: string; type: "success"|"info" } | null>(null)
   // Live clock
   const [clockStr, setClockStr]   = useState(() => new Date().toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" }))
-  useEffect(() => {
-    const t = setInterval(() => setClockStr(new Date().toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" })), 10000)
-    return () => clearInterval(t)
-  }, [])
 
   const showToast = useCallback((msg: string, type: "success"|"info" = "success") => {
     setToast({ msg, type })
     setTimeout(() => setToast(null), 2500)
   }, [])
 
+  // ── Real API Commits after Grace Period ──
+  const commitSendToKitchen = useCallback(async (tableId: string, items: OrderItem[]) => {
+    setBusy(true)
+    try {
+      const existing = orders.find(o => o.tableId === tableId && o.status !== "paid")
+      let orderId: string
+      if (existing) {
+        for (const it of items) {
+          await OrdersApi.addItem(existing.id, {
+            menuItemId: it.menuItemId,
+            quantity: it.quantity,
+            note: [it.allergyNotes && `[DỊ ỨNG] ${it.allergyNotes}`, it.notes].filter(Boolean).join(" · ") || undefined,
+          })
+        }
+        orderId = existing.id
+      } else {
+        const created = await OrdersApi.create({
+          tableId: tableId,
+          type: "DINE_IN",
+          items: items.map(it => ({
+            menuItemId: it.menuItemId,
+            quantity: it.quantity,
+            note: [it.allergyNotes && `[DỊ ỨNG] ${it.allergyNotes}`, it.notes].filter(Boolean).join(" · ") || undefined,
+          })),
+        })
+        orderId = created.id
+        try { await TablesApi.updateStatus(tableId, { status: tableStatusToApi("occupied"), currentOrderId: orderId }) } catch {}
+      }
+      try {
+        await KitchenApi.createTicket({
+          orderId, tableId: tableId,
+          items: items.map(it => ({
+            menuItemId: it.menuItemId, menuItemName: it.menuItem.name, quantity: it.quantity,
+            notes: [it.allergyNotes && `[DỊ ỨNG] ${it.allergyNotes}`, it.notes].filter(Boolean).join(" · ") || undefined,
+          })),
+        })
+      } catch {}
+      await loadAll(true)
+    } catch (err) {
+      showToast(err instanceof ApiError ? err.message : "Lỗi gửi bếp", "info")
+    } finally {
+      setBusy(false)
+    }
+  }, [orders, loadAll, showToast])
+
+  const commitMarkServed = useCallback(async (orderId: string, itemId: string) => {
+    setBusy(true)
+    try {
+      await OrdersApi.updateItemStatus(orderId, itemId, orderItemStatusToApi("served"))
+      await loadAll(true)
+    } catch (err) {
+      showToast(err instanceof ApiError ? err.message : "Lỗi cập nhật", "info")
+    } finally {
+      setBusy(false)
+    }
+  }, [loadAll, showToast])
+
+  const markServed = useCallback(async (orderId: string, itemId: string) => {
+    setServedGrace(prev => ({ ...prev, [itemId]: { orderId, timeLeft: 30 } }))
+    showToast("Đã đánh dấu phục vụ ✓ (30s để hoàn tác)")
+  }, [showToast])
+
+  const undoServed = useCallback(async (orderId: string, itemId: string) => {
+    // 1. Remove from grace period immediately so timer doesn't trigger API
+    setServedGrace(prev => {
+      const next = { ...prev }
+      delete next[itemId]
+      return next
+    })
+
+    showToast("Đã hoàn tác phục vụ ⟲")
+  }, [showToast])
+
+  const cancelSentItem = useCallback(async (orderId: string, itemId: string) => {
+    const order = orders.find(o => o.id === orderId)
+    const item = order?.items.find(i => i.id === itemId)
+    
+    if (item && ["cooking", "ready", "served"].includes(item.status)) {
+      alert("Món này đã bắt đầu được chế biến. Vui lòng liên hệ Quản lý hoặc Bếp trưởng để hủy thao tác này.")
+      return
+    }
+
+    if (!confirm("Hủy món này? Bếp sẽ không nấu nữa.")) return
+    setBusy(true)
+    try {
+      await OrdersApi.updateItemStatus(orderId, itemId, orderItemStatusToApi("cancelled"))
+      showToast("Đã hủy món ✕", "info")
+      await loadAll(true)
+    } catch (err) {
+      showToast(err instanceof ApiError ? err.message : "Lỗi hủy món", "info")
+    } finally {
+      setBusy(false)
+    }
+  }, [orders, loadAll, showToast])
+
+  const sendToKitchen = useCallback(async () => {
+    if (draftItems.length === 0 || !selectedId) return
+    setSendGrace({ items: draftItems, tableId: selectedId, timeLeft: 30 })
+    setDraftItems([])
+    showToast("Đang gửi bếp... (30s để hoàn tác)", "info")
+  }, [draftItems, selectedId, showToast])
+
+  const cancelSendGrace = useCallback(() => {
+    if (!sendGrace) return
+    setDraftItems(prev => [...prev, ...sendGrace.items])
+    setSendGrace(null)
+    showToast("Đã hoàn tác gửi bếp ⟲")
+  }, [sendGrace, showToast])
+
+  // Watch for grace period expiry for Send to Kitchen
+  useEffect(() => {
+    if (sendGrace && sendGrace.timeLeft === 0) {
+      commitSendToKitchen(sendGrace.tableId, sendGrace.items)
+      setSendGrace(null)
+    }
+  }, [sendGrace, commitSendToKitchen])
+
+  // Consolidated Timer: handles all countdowns + live clock
+  useEffect(() => {
+    const timer = setInterval(() => {
+      // 1. Update clock
+      setClockStr(new Date().toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" }))
+
+      // 2. Handle Send to Kitchen Grace
+      setSendGrace(prev => {
+        if (!prev || prev.timeLeft <= 0) return prev
+        return { ...prev, timeLeft: prev.timeLeft - 1 }
+      })
+
+      // 3. Handle Served Grace
+      setServedGrace(prev => {
+        const next = { ...prev }
+        let changed = false
+        for (const id in next) {
+          if (next[id].timeLeft === 1) {
+            // Commit to API just before removing from grace period
+            commitMarkServed(next[id].orderId, id)
+            delete next[id]
+            changed = true
+          } else {
+            next[id] = { ...next[id], timeLeft: next[id].timeLeft - 1 }
+            changed = true
+          }
+        }
+        return changed ? next : prev
+      })
+    }, 1000)
+    return () => clearInterval(timer)
+  }, [commitMarkServed])
+
   const selectedTable = useMemo(() => tables.find(t => t.id === selectedId) ?? null, [tables, selectedId])
   const currentOrder  = useMemo(
-    () => orders.find(o => o.tableId === selectedId && o.status !== "paid") ?? null,
-    [orders, selectedId]
+    () => {
+      const order = orders.find(o => o.tableId === selectedId && o.status !== "paid")
+      if (!order) return null
+      // Locally override status for items in servedGrace
+      const items = order.items.map(item => {
+        if (servedGrace[item.id]) {
+          return { ...item, status: "served" as const }
+        }
+        return item
+      })
+      return { ...order, items }
+    },
+    [orders, selectedId, servedGrace]
   )
   const sentItems  = currentOrder?.items ?? []
   const allItems   = useMemo(() => [...sentItems, ...draftItems], [sentItems, draftItems])
@@ -231,105 +392,6 @@ export default function POSPage() {
   const removeDraftItem = useCallback((id: string) => {
     setDraftItems(prev => prev.filter(i => i.id !== id))
   }, [])
-
-  const markServed = useCallback(async (orderId: string, itemId: string) => {
-    setBusy(true)
-    try {
-      await OrdersApi.updateItemStatus(orderId, itemId, orderItemStatusToApi("served"))
-      showToast("Đã đánh dấu phục vụ ✓")
-      await loadAll(true)
-    } catch (err) {
-      showToast(err instanceof ApiError ? err.message : "Lỗi cập nhật", "info")
-    } finally {
-      setBusy(false)
-    }
-  }, [loadAll, showToast])
-
-  const cancelSentItem = useCallback(async (orderId: string, itemId: string) => {
-    if (!confirm("Hủy món này? Bếp sẽ không nấu nữa.")) return
-    setBusy(true)
-    try {
-      await OrdersApi.updateItemStatus(orderId, itemId, orderItemStatusToApi("cancelled"))
-      showToast("Đã hủy món ✕", "info")
-      await loadAll(true)
-    } catch (err) {
-      showToast(err instanceof ApiError ? err.message : "Lỗi hủy món", "info")
-    } finally {
-      setBusy(false)
-    }
-  }, [loadAll, showToast])
-
-  // ── Send to kitchen ──
-  // Tạo order ở BE (nếu chưa có) → tạo kitchen ticket → set table OCCUPIED.
-  const sendToKitchen = useCallback(async () => {
-    if (draftItems.length === 0 || !selectedId) return
-    const table = tables.find(t => t.id === selectedId)
-    if (!table) return
-
-    setBusy(true)
-    try {
-      const existing = orders.find(o => o.tableId === selectedId && o.status !== "paid")
-
-      let orderId: string
-      if (existing) {
-        // Thêm items vào order hiện có (gửi tuần tự — BE chưa hỗ trợ batch).
-        for (const it of draftItems) {
-          await OrdersApi.addItem(existing.id, {
-            menuItemId: it.menuItemId,
-            quantity: it.quantity,
-            note: [it.allergyNotes && `[DỊ ỨNG] ${it.allergyNotes}`, it.notes].filter(Boolean).join(" · ") || undefined,
-          })
-        }
-        orderId = existing.id
-      } else {
-        // Tạo order mới.
-        const created = await OrdersApi.create({
-          tableId: selectedId,
-          type: "DINE_IN",
-          items: draftItems.map(it => ({
-            menuItemId: it.menuItemId,
-            quantity: it.quantity,
-            note: [it.allergyNotes && `[DỊ ỨNG] ${it.allergyNotes}`, it.notes].filter(Boolean).join(" · ") || undefined,
-          })),
-        })
-        orderId = created.id
-        // Cập nhật trạng thái bàn → OCCUPIED kèm currentOrderId.
-        try {
-          await TablesApi.updateStatus(selectedId, {
-            status: tableStatusToApi("occupied"),
-            currentOrderId: orderId,
-          })
-        } catch {/* non-fatal */}
-      }
-
-      // Tạo kitchen ticket để KDS thấy.
-      try {
-        await KitchenApi.createTicket({
-          orderId,
-          tableId: selectedId,
-          items: draftItems.map(it => ({
-            menuItemId: it.menuItemId,
-            menuItemName: it.menuItem.name,
-            quantity: it.quantity,
-            notes: [it.allergyNotes && `[DỊ ỨNG] ${it.allergyNotes}`, it.notes].filter(Boolean).join(" · ") || undefined,
-          })),
-        })
-      } catch (err) {
-        // Không chặn flow nếu kitchen-service down — order vẫn lưu được.
-        console.warn("Tạo kitchen ticket thất bại:", err)
-      }
-
-      const count = draftItems.reduce((s, i) => s + i.quantity, 0)
-      setDraftItems([])
-      showToast(`Đã gửi ${count} món xuống bếp 🍳`, "info")
-      await loadAll(true)
-    } catch (err) {
-      const msg = err instanceof ApiError ? err.message : "Lỗi gửi bếp"
-      showToast(msg, "info")
-    } finally {
-      setBusy(false)
-    }
-  }, [draftItems, selectedId, tables, orders, loadAll, showToast])
 
   // ── Apply voucher ──
   const applyVoucher = useCallback(() => {
@@ -487,17 +549,21 @@ export default function POSPage() {
             </div>
           </div>
           <div className="flex-1 overflow-y-auto px-4 py-4 space-y-3 bg-slate-50/50">
-            {["A", "B", "C"].map(sec => {
-              const sectionTables = tables.filter(t => t.section === sec)
-              const isCollapsed = collapsedSections.has(sec)
+            {[
+              { id: "A", label: "Trong nhà", floor: "1" },
+              { id: "B", label: "Sân vườn", floor: "1" },
+              { id: "C", label: "Phòng VIP", floor: "2" }
+            ].map(sec => {
+              const sectionTables = tables.filter(t => t.section === sec.id)
+              const isCollapsed = collapsedSections.has(sec.id)
               const sectionEmpty = sectionTables.filter(t => t.status === "empty").length
               const sectionOccupied = sectionTables.filter(t => t.status === "occupied").length
               return (
-                <div key={sec}>
+                <div key={sec.id}>
                   <button
                     onClick={() => setCollapsedSections(prev => {
                       const next = new Set(prev)
-                      if (next.has(sec)) next.delete(sec); else next.add(sec)
+                      if (next.has(sec.id)) next.delete(sec.id); else next.add(sec.id)
                       return next
                     })}
                     className="w-full flex items-center justify-between mb-2.5 px-2 py-1.5 rounded-lg hover:bg-slate-100 transition-colors group"
@@ -507,7 +573,7 @@ export default function POSPage() {
                         ? <ChevronRight className="w-3.5 h-3.5 text-slate-400 group-hover:text-slate-600" />
                         : <ChevronDown className="w-3.5 h-3.5 text-slate-400 group-hover:text-slate-600" />}
                       <span className="text-xs font-bold text-slate-500 uppercase tracking-widest">
-                        Khu {sec} · Tầng {sec === "C" ? "2" : "1"}
+                        {sec.label} · Tầng {sec.floor}
                       </span>
                     </span>
                     <span className="flex items-center gap-1.5 text-[10px]">
@@ -738,11 +804,16 @@ export default function POSPage() {
                               <span className={cn("text-[11px] px-2 py-0.5 rounded font-semibold", cfg.cls)}>
                                 {cfg.label}
                               </span>
-                              {item.status === "pending" && currentOrder && (
+                              {["pending", "cooking", "ready"].includes(item.status) && currentOrder && (
                                 <button
                                   onClick={() => cancelSentItem(currentOrder.id, item.id)}
-                                  className="w-6 h-6 bg-red-100 hover:bg-red-500 hover:text-white text-red-500 rounded-full flex items-center justify-center transition-colors"
-                                  title="Hủy món"
+                                  className={cn(
+                                    "w-6 h-6 rounded-full flex items-center justify-center transition-colors",
+                                    item.status === "pending" 
+                                      ? "bg-red-100 hover:bg-red-500 hover:text-white text-red-500" 
+                                      : "bg-slate-100 hover:bg-slate-200 text-slate-400"
+                                  )}
+                                  title={item.status === "pending" ? "Hủy món" : "Yêu cầu hủy món đang chế biến"}
                                 >
                                   <X className="w-3.5 h-3.5" />
                                 </button>
@@ -756,6 +827,18 @@ export default function POSPage() {
                                   <CheckCircle2 className="w-3.5 h-3.5" />
                                 </button>
                               )}
+                              {servedGrace[item.id] && currentOrder && (
+                                <button
+                                  onClick={() => undoServed(currentOrder.id, item.id)}
+                                  className="w-7 h-7 bg-amber-100 hover:bg-amber-200 text-amber-700 rounded-full flex items-center justify-center transition-colors shadow-sm"
+                                  title="Hoàn tác phục vụ (trước khi gửi chính thức)"
+                                >
+                                  <div className="flex flex-col items-center leading-none">
+                                    <Undo2 className="w-2.5 h-2.5 mb-0.5" />
+                                    <span className="text-[9px] font-bold">{servedGrace[item.id].timeLeft}s</span>
+                                  </div>
+                                </button>
+                              )}
                             </div>
                           </div>
                         )
@@ -767,9 +850,17 @@ export default function POSPage() {
                 {/* Draft items */}
                 {draftItems.length > 0 && (
                   <div>
-                    <p className="text-xs font-bold text-blue-500 uppercase tracking-widest mb-2 px-1 flex items-center gap-1.5">
-                      <Plus className="w-3.5 h-3.5" />Món mới · chưa gửi
-                    </p>
+                    <div className="flex items-center justify-between mb-2 px-1">
+                      <p className="text-xs font-bold text-blue-500 uppercase tracking-widest flex items-center gap-1.5">
+                        <Plus className="w-3.5 h-3.5" />Món mới · chưa gửi
+                      </p>
+                      <button 
+                        onClick={() => { if(confirm("Xóa tất cả món chưa gửi?")) setDraftItems([]) }}
+                        className="text-[10px] font-bold text-red-500 hover:text-red-700 transition-colors uppercase tracking-tight"
+                      >
+                        Hủy tất cả
+                      </button>
+                    </div>
                     <div className="space-y-1.5">
                       {draftItems.map(item => (
                         <div key={item.id} className="flex items-center gap-2 bg-blue-50 border border-blue-200 rounded-lg px-3 py-2.5">
@@ -865,7 +956,39 @@ export default function POSPage() {
 
               {/* Action buttons */}
               <div className="p-4 space-y-2.5">
-                {draftItems.length > 0 && (
+                {sendGrace && (
+                  <div className="bg-blue-600 rounded-xl p-3 flex items-center justify-between text-white shadow-lg animate-in slide-in-from-bottom-2">
+                    <div className="flex items-center gap-2">
+                      <div className="relative w-6 h-6 flex items-center justify-center">
+                        <svg className="absolute inset-0 w-6 h-6 -rotate-90">
+                          <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2" fill="none" className="opacity-30" />
+                          <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2" fill="none" 
+                            strokeDasharray="62.83" 
+                            strokeDashoffset={62.83 * (1 - sendGrace.timeLeft / 30)}
+                            className="transition-all duration-1000 ease-linear"
+                          />
+                        </svg>
+                        <span className="text-[10px] font-bold">{sendGrace.timeLeft}</span>
+                      </div>
+                      <span className="text-xs font-bold">Đang gửi bếp...</span>
+                    </div>
+                    <div className="flex gap-2">
+                      <button 
+                        onClick={cancelSendGrace}
+                        className="text-[10px] font-bold bg-white/20 hover:bg-white/30 px-2 py-1 rounded border border-white/30 transition-colors"
+                      >
+                        HOÀN TÁC
+                      </button>
+                      <button 
+                        onClick={() => { commitSendToKitchen(sendGrace.tableId, sendGrace.items); setSendGrace(null) }}
+                        className="text-[10px] font-bold bg-white text-blue-600 px-2 py-1 rounded transition-colors"
+                      >
+                        GỬI NGAY
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {draftItems.length > 0 && !sendGrace && (
                   <button
                     onClick={sendToKitchen}
                     className="w-full bg-orange-500 hover:bg-orange-600 text-white rounded-xl py-3 text-base font-bold flex items-center justify-center gap-2 transition-colors shadow-sm active:scale-[0.98]"
@@ -910,38 +1033,59 @@ export default function POSPage() {
 
             <div className="space-y-2.5">
               <div>
-                <label className="text-xs font-semibold text-red-500 mb-1 block flex items-center gap-1">
-                  <AlertCircle className="w-3 h-3" />Ghi chú dị ứng (bếp sẽ thấy màu đỏ)
+                <label className="text-xs font-semibold text-red-500 mb-1 block flex items-center justify-between">
+                  <span className="flex items-center gap-1"><AlertCircle className="w-3 h-3" />Ghi chú dị ứng</span>
+                  <span className={cn("text-[10px]", allergyText.length > 100 ? "text-red-600 font-bold" : "text-slate-400")}>
+                    {allergyText.length}/100
+                  </span>
                 </label>
                 <input
                   value={allergyText}
                   onChange={e => setAllergyText(e.target.value)}
                   placeholder="dị ứng đậu phộng, không hải sản..."
-                  className="w-full border border-red-200 focus:border-red-400 rounded-lg px-3 py-2 text-sm outline-none bg-red-50"
+                  className={cn(
+                    "w-full border rounded-lg px-3 py-2 text-sm outline-none transition-colors",
+                    allergyText.length > 100 ? "border-red-500 bg-red-50" : "border-red-200 focus:border-red-400 bg-red-50/50"
+                  )}
                 />
+                {allergyText.length > 100 && (
+                  <p className="text-[10px] text-red-600 mt-1 font-medium">Ghi chú tối đa 100 ký tự</p>
+                )}
               </div>
               <div>
-                <label className="text-xs font-semibold text-slate-600 mb-1 block">Ghi chú nấu</label>
+                <label className="text-xs font-semibold text-slate-600 mb-1 block flex items-center justify-between">
+                  <span>Ghi chú nấu</span>
+                  <span className={cn("text-[10px]", noteText.length > 100 ? "text-red-600 font-bold" : "text-slate-400")}>
+                    {noteText.length}/100
+                  </span>
+                </label>
                 <textarea
                   value={noteText}
                   onChange={e => setNoteText(e.target.value)}
                   rows={2}
                   placeholder="ít muối, không hành, chín kỹ..."
-                  className="w-full border border-slate-200 focus:border-blue-400 rounded-lg px-3 py-2 text-sm outline-none resize-none"
+                  className={cn(
+                    "w-full border rounded-lg px-3 py-2 text-sm outline-none resize-none transition-colors",
+                    noteText.length > 100 ? "border-red-500 bg-red-50" : "border-slate-200 focus:border-blue-400"
+                  )}
                 />
+                {noteText.length > 100 && (
+                  <p className="text-[10px] text-red-600 mt-1 font-medium">Ghi chú tối đa 100 ký tự</p>
+                )}
               </div>
             </div>
 
             <div className="flex gap-2 mt-4">
               <button onClick={() => setNoteTarget(null)} className="flex-1 py-2 border border-slate-200 rounded-xl text-sm text-slate-600 hover:bg-slate-50">Hủy</button>
               <button
+                disabled={noteText.length > 100 || allergyText.length > 100}
                 onClick={() => {
                   setDraftItems(prev => prev.map(i =>
                     i.id === noteTarget.id ? { ...i, notes: noteText, allergyNotes: allergyText } : i
                   ))
                   setNoteTarget(null)
                 }}
-                className="flex-1 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-bold transition-colors"
+                className="flex-1 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl text-sm font-bold transition-colors"
               >
                 Lưu ghi chú
               </button>
@@ -953,9 +1097,9 @@ export default function POSPage() {
       {/* ═══ PAYMENT MODAL ═══ */}
       {showPay && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[95vh] flex flex-col">
             {/* Modal header */}
-            <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+            <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between shrink-0">
               <div className="flex items-center gap-2">
                 <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center">
                   <Receipt className="w-4 h-4 text-white" />
@@ -970,7 +1114,7 @@ export default function POSPage() {
               </button>
             </div>
 
-            <div className="px-6 py-4">
+            <div className="px-6 py-4 overflow-y-auto custom-scrollbar">
               {/* Split */}
               {splitBy > 0 && (
                 <div className="mb-4 p-3 bg-blue-50 rounded-xl border border-blue-200">

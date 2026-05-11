@@ -56,6 +56,7 @@ export default function HostPage() {
   const [showAddRes, setShowAddRes]     = useState(false)
   const [showAddWait, setShowAddWait]   = useState(false)
   const [editRes, setEditRes]           = useState<Reservation | null>(null)
+  const [confirmResModal, setConfirmResModal] = useState<Reservation | null>(null)
 
   // New reservation form
   const [resForm, setResForm] = useState({ guestName: "", phone: "", partySize: 2, time: "19:00", notes: "" })
@@ -109,6 +110,7 @@ export default function HostPage() {
     [occupiedTables]
   )
   const confirmedRes = useMemo(() => reservations.filter(r => r.status === "confirmed"), [reservations])
+  const pendingRes   = useMemo(() => reservations.filter(r => r.status === "pending"), [reservations])
   const unnotified   = useMemo(() => waitlist.filter(w => !w.notified && emptyTables.some(t => t.capacity >= w.partySize)), [waitlist, emptyTables])
 
   // ── Actions ── (gọi BE)
@@ -131,24 +133,34 @@ export default function HostPage() {
     setBusy(true)
     try {
       const [h, m] = resForm.time.split(":").map(Number)
-      const dt = new Date(); dt.setHours(h, m, 0, 0)
-      // BE yêu cầu future date — nếu giờ chọn đã qua trong hôm nay, đẩy sang ngày mai.
-      if (dt.getTime() <= Date.now()) dt.setDate(dt.getDate() + 1)
-      // ISO không có timezone (BE format yyyy-MM-dd'T'HH:mm:ss).
+      const now = new Date()
+      const dt = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, 0)
+      
+      if (dt <= now) {
+        dt.setDate(dt.getDate() + 1)
+      }
+
       const pad = (n: number) => String(n).padStart(2, "0")
-      const isoLocal = `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())}T${pad(dt.getHours())}:${pad(dt.getMinutes())}:00`
+      // Explicit format: yyyy-MM-ddTHH:mm:ss
+      const formattedTime = `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}T${pad(dt.getHours())}:${pad(dt.getMinutes())}:00`
+
       await ReservationsApi.create({
         customerName: resForm.guestName,
         customerPhone: resForm.phone,
         partySize: resForm.partySize,
-        reservationTime: isoLocal,
+        reservationTime: formattedTime,
         notes: resForm.notes || undefined,
       })
       setShowAddRes(false)
       setResForm({ guestName: "", phone: "", partySize: 2, time: "19:00", notes: "" })
       await loadAll(true)
     } catch (err) {
-      alert(err instanceof ApiError ? err.message : "Lỗi tạo đặt bàn")
+      let msg = "Lỗi tạo đặt bàn"
+      if (err instanceof ApiError) {
+        const body = err.body as any
+        msg = body?.message || body?.detail || err.message || "Internal Server Error"
+      }
+      alert(msg)
     } finally { setBusy(false) }
   }, [resForm, loadAll])
 
@@ -165,7 +177,12 @@ export default function HostPage() {
       setWaitForm({ guestName: "", phone: "", partySize: 2 })
       await loadAll(true)
     } catch (err) {
-      alert(err instanceof ApiError ? err.message : "Lỗi thêm hàng đợi")
+      let msg = "Lỗi thêm hàng đợi"
+      if (err instanceof ApiError) {
+        const body = err.body as any
+        msg = body?.message || body?.detail || err.message || "Internal Server Error"
+      }
+      alert(msg)
     } finally { setBusy(false) }
   }, [waitForm, loadAll])
 
@@ -196,6 +213,18 @@ export default function HostPage() {
       alert(err instanceof ApiError ? err.message : "Lỗi xếp bàn tự động")
     } finally { setBusy(false) }
   }, [loadAll])
+
+  const confirmReservation = useCallback(async (tableId: string) => {
+    if (!confirmResModal) return
+    setBusy(true)
+    try {
+      await ReservationsApi.confirm(confirmResModal.id, tableId)
+      setConfirmResModal(null)
+      await loadAll(true)
+    } catch (err) {
+      alert(err instanceof ApiError ? err.message : "Lỗi xác nhận đặt bàn")
+    } finally { setBusy(false) }
+  }, [confirmResModal, loadAll])
 
   const checkInReservation = useCallback(async (id: string) => {
     const res = reservations.find(r => r.id === id)
@@ -355,18 +384,22 @@ export default function HostPage() {
 
           {/* Floor plan */}
           <div className="flex-1 overflow-y-auto p-4 space-y-5">
-            {["A", "B", "C"].map(sec => (
-              <div key={sec}>
+            {[
+              { id: "A", label: "Trong nhà", floor: "1" },
+              { id: "B", label: "Sân vườn", floor: "1" },
+              { id: "C", label: "Phòng VIP", floor: "2" }
+            ].map(sec => (
+              <div key={sec.id}>
                 <div className="flex items-center gap-2 mb-3">
-                  <h2 className="text-xs font-black text-slate-400 uppercase tracking-widest">Khu {sec}</h2>
-                  <span className="text-[10px] text-slate-300">Tầng {sec === "C" ? 2 : 1}</span>
+                  <h2 className="text-xs font-black text-slate-400 uppercase tracking-widest">{sec.label}</h2>
+                  <span className="text-[10px] text-slate-300">Tầng {sec.floor}</span>
                   <div className="flex-1 h-px bg-slate-100" />
                   <span className="text-[10px] text-slate-400">
-                    {tables.filter(t => t.section === sec && t.status === "empty").length}/{tables.filter(t => t.section === sec).length} trống
+                    {tables.filter(t => t.section === sec.id && t.status === "empty").length}/{tables.filter(t => t.section === sec.id).length} trống
                   </span>
                 </div>
                 <div className="grid grid-cols-5 gap-2.5">
-                  {tables.filter(t => t.section === sec).map(t => {
+                  {tables.filter(t => t.section === sec.id).map(t => {
                     const cfg = TABLE_CFG[t.status]
                     const isSelected = t.id === selectedId
                     const res = reservations.find(r => r.tableId === t.id && r.status === "confirmed")
@@ -488,12 +521,22 @@ export default function HostPage() {
                       {/* Actions */}
                       <div className="space-y-2">
                         {selectedTable.status === "empty" && (
-                          <button
-                            onClick={() => setSeatModal({ tableId: selectedTable.id })}
-                            className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-sm font-bold flex items-center justify-center gap-2 transition-colors"
-                          >
-                            <UserPlus className="w-4 h-4" />Xếp chỗ cho khách
-                          </button>
+                          <>
+                            <button
+                              onClick={() => setSeatModal({ tableId: selectedTable.id })}
+                              className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-sm font-bold flex items-center justify-center gap-2 transition-colors shadow-sm"
+                            >
+                              <UserPlus className="w-4 h-4" />Xếp khách mới
+                            </button>
+                            {pendingRes.filter(r => r.partySize <= selectedTable.capacity).length > 0 && (
+                              <button
+                                onClick={() => setPanel("reservations")}
+                                className="w-full py-2.5 bg-amber-50 border border-amber-200 text-amber-700 hover:bg-amber-100 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-colors"
+                              >
+                                <Calendar className="w-3.5 h-3.5" />Gán đơn đặt trước ({pendingRes.filter(r => r.partySize <= selectedTable.capacity).length})
+                              </button>
+                            )}
+                          </>
                         )}
                         {selectedTable.status === "occupied" && (
                           <button
@@ -605,10 +648,11 @@ export default function HostPage() {
                             "text-[10px] px-2 py-0.5 rounded-lg font-bold border shrink-0",
                             r.status === "confirmed"  ? "bg-emerald-50 text-emerald-700 border-emerald-200" :
                             r.status === "arrived"    ? "bg-sky-50 text-sky-700 border-sky-200" :
+                            r.status === "pending"    ? "bg-amber-50 text-amber-700 border-amber-200" :
                             r.status === "cancelled"  ? "bg-slate-100 text-slate-500 border-slate-200" :
                             "bg-red-50 text-red-600 border-red-200"
                           )}>
-                            {{confirmed:"✓ Xác nhận", arrived:"● Đã đến", cancelled:"✕ Đã hủy", "no-show":"✕ Không đến"}[r.status]}
+                            {{confirmed:"✓ Xác nhận", arrived:"● Đã đến", pending:"○ Chờ gán bàn", cancelled:"✕ Đã hủy", "no-show":"✕ Không đến"}[r.status]}
                           </span>
                         </div>
                         <div className="flex flex-wrap gap-2.5 text-xs text-slate-500 mb-2.5">
@@ -634,7 +678,15 @@ export default function HostPage() {
                         )}
                         {!isCancelled && (
                           <div className="flex gap-1.5">
-                            {!r.confirmationSent && (
+                            {!r.tableId && (
+                              <button
+                                onClick={() => setConfirmResModal(r)}
+                                className="flex-1 py-1.5 bg-amber-50 border border-amber-200 text-amber-700 hover:bg-amber-100 rounded-xl text-xs font-semibold flex items-center justify-center gap-1 transition-colors"
+                              >
+                                <MapPin className="w-3 h-3" />Gán bàn
+                              </button>
+                            )}
+                            {!r.confirmationSent && r.status === "confirmed" && (
                               <button
                                 onClick={() => setReservations(prev => prev.map(x => x.id === r.id ? { ...x, confirmationSent: true } : x))}
                                 className="flex-1 py-1.5 bg-sky-50 border border-sky-200 text-sky-700 hover:bg-sky-100 rounded-xl text-xs font-semibold flex items-center justify-center gap-1 transition-colors"
@@ -642,7 +694,7 @@ export default function HostPage() {
                                 <Send className="w-3 h-3" />Gửi SMS
                               </button>
                             )}
-                            {r.status === "confirmed" && (
+                            {r.status === "confirmed" && r.tableId && (
                               <button
                                 onClick={() => checkInReservation(r.id)}
                                 className="flex-1 py-1.5 bg-emerald-50 border border-emerald-200 text-emerald-700 hover:bg-emerald-100 rounded-xl text-xs font-semibold flex items-center justify-center gap-1 transition-colors"
@@ -675,6 +727,16 @@ export default function HostPage() {
                   <Plus className="w-4 h-4" />Thêm vào hàng chờ
                 </button>
 
+                {/* Overdue Alert (UC12-2a) */}
+                {tables.some(t => t.status === "occupied" && t.occupiedSince && minutesSince(t.occupiedSince) > 60) && (
+                  <div className="mb-3 p-2.5 bg-amber-50 border border-amber-200 rounded-xl flex items-start gap-2">
+                    <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                    <p className="text-[11px] text-amber-700 leading-tight">
+                      <b>Hệ thống trễ:</b> Có bàn ngồi quá giờ (60p+). ETA đã được tự động điều chỉnh tăng.
+                    </p>
+                  </div>
+                )}
+
                 {waitlist.length === 0 ? (
                   <div className="text-center text-slate-400 py-10">
                     <Timer className="w-10 h-10 mx-auto mb-2 opacity-30" />
@@ -687,6 +749,8 @@ export default function HostPage() {
                       const waited = minutesSince(w.addedAt)
                       const assignedTable = tables.find(t => t.id === w.tableId)
                       const canAssign = emptyTables.some(t => t.capacity >= w.partySize)
+                      const hasSystemDelay = tables.some(t => t.status === "occupied" && t.occupiedSince && minutesSince(t.occupiedSince) > 60)
+                      
                       return (
                         <div key={w.id} className="bg-white rounded-2xl border border-slate-200 p-3.5 shadow-sm">
                           <div className="flex items-start justify-between mb-2">
@@ -704,6 +768,7 @@ export default function HostPage() {
                             <div className="text-right shrink-0">
                               <p className={cn(
                                 "text-sm font-black",
+                                hasSystemDelay ? "text-amber-600 underline decoration-amber-300 underline-offset-2" :
                                 w.estimatedWaitMinutes <= 5 ? "text-emerald-600" :
                                 w.estimatedWaitMinutes <= 15 ? "text-amber-600" : "text-slate-600"
                               )}>
@@ -840,6 +905,81 @@ export default function HostPage() {
           </div>
         )
       })()}
+
+      {/* ═══ CONFIRM RESERVATION (ASSIGN TABLE) MODAL ═══ */}
+      {confirmResModal && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-md">
+            <div className="flex items-center justify-between mb-5">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-amber-100 flex items-center justify-center">
+                  <Calendar className="w-5 h-5 text-amber-600" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-slate-800">Xác nhận & Gán bàn</h3>
+                  <p className="text-xs text-slate-400 mt-0.5">{confirmResModal.guestName} · {confirmResModal.partySize} người</p>
+                </div>
+              </div>
+              <button onClick={() => setConfirmResModal(null)} className="text-slate-400 hover:text-slate-600 p-1"><X className="w-4 h-4" /></button>
+            </div>
+
+            <div className="mb-4">
+              <label className="text-xs font-bold text-slate-500 mb-2 block uppercase tracking-wider">Chọn bàn gán cho khách</label>
+              <div className="grid grid-cols-2 gap-2 max-h-60 overflow-y-auto pr-1">
+                {tables.filter(t => t.capacity >= confirmResModal.partySize).length === 0 ? (
+                  <p className="col-span-2 text-center py-6 text-xs text-slate-400 bg-slate-50 rounded-xl border border-dashed border-slate-200">
+                    Không có bàn nào đủ sức chứa {confirmResModal.partySize} người
+                  </p>
+                ) : (
+                  tables
+                    .filter(t => t.capacity >= confirmResModal.partySize)
+                    .sort((a, b) => a.number - b.number)
+                    .map(t => {
+                      const isFree = t.status === "empty"
+                      const cfg = TABLE_CFG[t.status]
+                      return (
+                        <button
+                          key={t.id}
+                          onClick={() => confirmReservation(t.id)}
+                          disabled={busy || !isFree}
+                          className={cn(
+                            "flex items-center justify-between p-3 border rounded-xl transition-all group",
+                            isFree ? "border-slate-200 hover:border-emerald-500 hover:bg-emerald-50" : "border-slate-100 opacity-50 cursor-not-allowed bg-slate-50"
+                          )}
+                        >
+                          <div className="flex items-center gap-2">
+                            <span className={cn(
+                              "w-7 h-7 rounded-lg text-xs font-black flex items-center justify-center transition-colors",
+                              isFree ? "bg-emerald-100 text-emerald-700 group-hover:bg-emerald-600 group-hover:text-white" : "bg-slate-200 text-slate-400"
+                            )}>
+                              {t.number}
+                            </span>
+                            <div className="text-left">
+                              <p className="text-sm font-bold text-slate-700">Bàn {t.number}</p>
+                              <p className={cn("text-[9px] font-medium", cfg.text)}>{cfg.label} · {t.capacity}c</p>
+                            </div>
+                          </div>
+                          {isFree && <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-emerald-500" />}
+                        </button>
+                      )
+                    })
+                )}
+              </div>
+            </div>
+
+            <p className="text-[10px] text-slate-400 mb-4 bg-slate-50 p-2.5 rounded-xl border border-slate-100 leading-relaxed">
+              * Chỉ có thể gán các bàn đang <b>Trống</b>. Sau khi gán, bàn sẽ được chuyển sang trạng thái <b>Đặt trước</b> (Vàng) để giữ chỗ.
+            </p>
+
+            <button
+              onClick={() => setConfirmResModal(null)}
+              className="w-full py-2.5 border border-slate-200 rounded-xl text-sm font-medium text-slate-600 hover:bg-slate-50 transition-colors"
+            >
+              Đóng
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* ═══ ADD RESERVATION MODAL ═══ */}
       {showAddRes && (

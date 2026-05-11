@@ -45,9 +45,14 @@ import type {
 // ─── Date helpers ──────────────────────────────────────────────────────────
 function toDate(s?: string): Date | undefined {
   if (!s) return undefined
-  // BE trả ISO local "yyyy-MM-ddTHH:mm:ss" → Date sẽ parse như local timezone.
-  // Với Z hoặc offset thì Date xử lý chuẩn.
-  const d = new Date(s)
+  // BE trả ISO local "yyyy-MM-ddTHH:mm:ss" không có Z. 
+  // Docker container thường chạy UTC nên ta cần append Z để Date() parse đúng là UTC.
+  // Nếu đã có Z hoặc offset (+07:00) thì giữ nguyên.
+  let normalized = s
+  if (!s.includes("Z") && !/[+-]\d{2}:\d{2}$/.test(s)) {
+    normalized = s + "Z"
+  }
+  const d = new Date(normalized)
   return isNaN(d.getTime()) ? undefined : d
 }
 
@@ -94,6 +99,7 @@ const TICKET_ITEM_STATUS_API_TO_UI: Record<TicketItemStatusApi, OrderItemStatus>
   PENDING:   "pending",
   COOKING:   "cooking",
   READY:     "ready",
+  SERVED:    "served",
   CANCELLED: "cancelled",
 }
 const TICKET_ITEM_STATUS_UI_TO_API: Partial<Record<OrderItemStatus, TicketItemStatusApi>> = {
@@ -205,6 +211,13 @@ export function menuItemFromApi(api: MenuItemApi): MenuItem {
 export function tableFromApi(api: RestaurantTableApi): Table {
   // tableNumber có thể là "B1", "12", "VIP-3"... cố parse số.
   const num = parseInt(api.tableNumber.replace(/\D+/g, ""), 10) || 0
+
+  // Map BE location to FE section (A, B, C)
+  // Indoor -> A, Patio -> B, VIP Room -> C
+  let section = "A"
+  if (api.location === "Patio") section = "B"
+  else if (api.location === "VIP Room") section = "C"
+
   return {
     id: api.id,
     number: num || 0,
@@ -212,8 +225,8 @@ export function tableFromApi(api: RestaurantTableApi): Table {
     status: tableStatusFromApi(api.status),
     currentOrderId: api.currentOrderId,
     occupiedSince: toDate(api.seatedAt),
-    section: api.location ?? "Tầng 1",
-    floor: 1,
+    section: section,
+    floor: section === "C" ? 2 : 1,
     isVIP: /vip/i.test(api.tableNumber) || /vip/i.test(api.location ?? ""),
   }
 }

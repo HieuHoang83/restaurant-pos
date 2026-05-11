@@ -163,7 +163,7 @@ export type TicketStatusApi =
   | "SERVED"
   | "CANCELLED"
 
-export type TicketItemStatusApi = "PENDING" | "COOKING" | "READY" | "CANCELLED"
+export type TicketItemStatusApi = "PENDING" | "COOKING" | "READY" | "SERVED" | "CANCELLED"
 
 export interface KitchenTicketItemDto {
   id: UUID

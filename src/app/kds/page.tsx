@@ -58,7 +58,7 @@ function buildTickets(orders: Order[], tableLabelById: Map<string, string>): Tic
     const label = tableLabelById.get(order.tableId) ?? `#${order.tableNumber || "?"}`
     const section = label.match(/^[A-Za-z]+/)?.[0] ?? ""
     for (const item of order.items) {
-      if (item.status === "served" || item.status === "cancelled") continue
+      if (item.status === "cancelled") continue
       tickets.push({
         orderId:      order.id,
         tableLabel:   label,
@@ -519,9 +519,10 @@ interface TicketCardProps {
 function TicketCard({ ticket: t, second: _second, isRecalled, onStart, onReady, onRecall, onSuspend }: TicketCardProps) {
   const elapsed   = Math.floor((Date.now() - t.sentAt.getTime()) / 1000)
   const slaPct    = Math.min(elapsed / t.slaSeconds, 1.5)
-  const isOverdue = elapsed > t.slaSeconds && t.item.status !== "ready"
-  const isWarn    = slaPct >= 0.8 && !isOverdue
-  const isDone    = t.item.status === "ready"
+  const isOverdue = elapsed > t.slaSeconds && t.item.status !== "ready" && t.item.status !== "served"
+  const isWarn    = slaPct >= 0.8 && !isOverdue && t.item.status !== "ready" && t.item.status !== "served"
+  const isDone    = t.item.status === "ready" || t.item.status === "served"
+  const isServed  = t.item.status === "served"
   const isCooking = t.item.status === "cooking"
   const isPending = t.item.status === "pending"
 
@@ -533,7 +534,7 @@ function TicketCard({ ticket: t, second: _second, isRecalled, onStart, onReady, 
 
   // Card background — done/overdue/warn keep their semantic colors, otherwise tint with station color
   const cardBg = isDone
-    ? "bg-[#0d1f14] border-emerald-800/50"
+    ? (isServed ? "bg-[#0d161f] border-sky-800/50" : "bg-[#0d1f14] border-emerald-800/50")
     : isOverdue
     ? "bg-[#1f0d0d] border-red-800/40"
     : isWarn
@@ -571,7 +572,7 @@ function TicketCard({ ticket: t, second: _second, isRecalled, onStart, onReady, 
           {/* Timer — uses station color when cooking, keeps semantic colors for special states */}
           <div className={cn(
             "font-mono text-sm font-black tabular-nums",
-            isDone ? "text-emerald-400" : isOverdue ? "text-red-400" : isWarn ? "text-amber-400" : isCooking ? stationCfg.textColor : "text-gray-400"
+            isServed ? "text-sky-400" : isDone ? "text-emerald-400" : isOverdue ? "text-red-400" : isWarn ? "text-amber-400" : isCooking ? stationCfg.textColor : "text-gray-400"
           )}>
             {formatElapsed(elapsed)}
           </div>
@@ -617,9 +618,10 @@ function TicketCard({ ticket: t, second: _second, isRecalled, onStart, onReady, 
           "text-[10px] px-2 py-0.5 rounded-md font-bold",
           isPending  && "bg-gray-700/60 text-gray-400",
           isCooking  && cn("border", stationCfg.badgeBg, stationCfg.textColor),
-          isDone     && "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30",
+          isDone && !isServed && "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30",
+          isServed && "bg-sky-500/20 text-sky-400 border border-sky-500/30",
         )}>
-          {isPending ? "● Chờ" : isCooking ? "🔥 Đang nấu" : "✓ Sẵn sàng"}
+          {isPending ? "● Chờ" : isCooking ? "🔥 Đang nấu" : isServed ? "🍽 Đã phục vụ" : "✓ Sẵn sàng"}
         </span>
       </div>
 
@@ -661,7 +663,7 @@ function TicketCard({ ticket: t, second: _second, isRecalled, onStart, onReady, 
             </button>
           </div>
         )}
-        {isDone && (
+        {isDone && !isServed && (
           <button
             onClick={onRecall}
             className="w-full py-2 bg-white/5 hover:bg-white/8 text-gray-600 hover:text-gray-400 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition-all"
